@@ -16,4 +16,6 @@ python -m pytest -q
 python app.py ../10-1dbe -o output/10-1dbe --preview
 ```
 
+可选免训练实验入口为 `python -m hanzi_mask.docentr`，依赖 `requirements-docentr.txt`，安装和运行见 `docs/DOCENTR.md`。它加载独立下载的 DocEnTr 官方 `models/binae.py` 和 Base/8/2018 权重，采用严格匹配与 `torch.load(weights_only=True)`；输出目录必须是新目录。`models/` 与 `output/research/` 均为忽略的资源目录。上游采用 CC BY-NC 4.0，源码和权重不随本项目分发。实验提供原尺寸切块和整字等比缩放，导出恢复原尺寸，分数图不是校准概率。PyTorch 延迟导入，核心命令行及普通测试不依赖模型包。Mac 的自动设备选择优先 MPS，可明确使用 `--device cpu`。
+
 修改算法后检查代表性拓片对照图，并如实区分合成图测试、真实图片批处理和人工视觉验收。测试图片不得作为已验证语义正确的标注。提交说明遵循工作区根 `AGENTS.md`。

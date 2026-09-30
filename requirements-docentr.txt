@@ -1,0 +1,7 @@
+# Optional, local pretrained-model experiment. Core CLI does not require these.
+-r requirements.txt
+torch>=2.6,<3
+torchvision>=0.21,<1
+vit-pytorch==0.24.3
+einops>=0.8,<1
+gdown>=5,<6
