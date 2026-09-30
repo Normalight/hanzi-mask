@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hanzi-mask"
+version = "0.1.0"
+description = "拓片单字候选掩膜提取与黑底白字导出"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26,<3",
+  "opencv-python-headless>=4.10,<5",
+  "Pillow>=10.4,<13",
+]
+
+[project.scripts]
+hanzi-mask = "hanzi_mask.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hanzi_mask*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
