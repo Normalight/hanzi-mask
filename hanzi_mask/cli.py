@@ -28,12 +28,16 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("-o", "--output", required=True, type=Path, help="输出文件夹")
     command.add_argument("--recursive", action="store_true", help="扫描子文件夹，保留相对路径")
     command.add_argument("--profile", choices=PROFILES, default="balanced", help="去噪强度")
+    command.add_argument("--method", choices=["texture", "morphology"], default="texture", help="texture 纹理与结构分离（默认）；morphology 使用原有几何筛选")
+    command.add_argument("--texture-strength", type=float, help="纹理平滑强度 0–0.05，默认按 profile 选择；仅 texture 使用")
+    command.add_argument("--texture-scale", type=float, default=3.0, help="纹理尺度 0.5–12 像素，默认 3；仅 texture 使用")
+    command.add_argument("--keep-isolated", action="store_true", help="保留通过面积筛选的远离主体的小区域，适用于独立点画")
     command.add_argument("--foreground", choices=["light", "dark"], default="light", help="原图字的明暗；拓片默认 light")
-    command.add_argument("--threshold", type=int, help="候选分界值 0–255，默认自动估计；dark 时按反相后的亮度计算")
+    command.add_argument("--threshold", type=int, help="处理后图像的分界值 0–255，默认自动估计；dark 时按反相后的亮度计算")
     command.add_argument("--stroke-radius", type=int, help="筛选笔画的圆盘半径，单位像素；0 关闭宽度筛选")
-    command.add_argument("--min-area", type=int, help="保留连通区域的最小像素面积；0 保留所有区域")
+    command.add_argument("--min-area", type=int, help="保留连通区域的最小像素面积；0 关闭面积筛选")
     command.add_argument("--median-size", type=int, choices=[1, 3, 5, 7], default=3, help="中值滤波尺寸；1 关闭")
-    command.add_argument("--restore-steps", type=int, default=0, help="受原候选限制的边缘恢复步数，0–10；可能恢复粘连碎斑")
+    command.add_argument("--restore-steps", type=int, default=0, help="受处理后候选限制的边缘恢复步数，0–10；可能恢复粘连碎斑")
     command.add_argument("--mask-dir", type=Path, help="人工掩膜目录：同名 PNG、同尺寸、白字黑底；有掩膜的图片直接采用掩膜")
     command.add_argument("--preview", action="store_true", help="生成原图、结果、删除/增加区域对照图")
     command.add_argument("--limit", type=int, help="只处理自然排序后的前 N 张图片")
@@ -116,6 +120,10 @@ def run(args: argparse.Namespace, command: argparse.ArgumentParser) -> int:
             min_area=args.min_area,
             median_size=args.median_size,
             restore_steps=args.restore_steps,
+            method=args.method,
+            texture_strength=args.texture_strength,
+            texture_scale=args.texture_scale,
+            keep_isolated=args.keep_isolated,
         )
         files = discover_images(source, output, args.recursive, mask_dir)
     except (OSError, ValueError) as error:
@@ -189,7 +197,7 @@ def run(args: argparse.Namespace, command: argparse.ArgumentParser) -> int:
         "parameters": options.to_dict(),
         "mask_dir": str(mask_dir) if mask_dir else None,
         "summary": summary,
-        "preview_legend": {"red": "删除的候选区域", "cyan": "人工掩膜增加的区域"},
+        "preview_legend": {"red": "相对原始明暗候选删除的区域", "cyan": "纹理平滑或人工掩膜增加的区域"},
         "previews": pages,
         "images": records,
     }

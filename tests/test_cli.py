@@ -116,3 +116,21 @@ def test_invalid_cli_option_is_a_usage_error(tmp_path):
     with pytest.raises(SystemExit) as error:
         main([str(source), "-o", str(tmp_path / "output"), "--stroke-radius", "-1"])
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize("method", ["texture", "morphology"])
+def test_method_parameters_reach_the_report(tmp_path, method):
+    source, output = tmp_path / "a.png", tmp_path / "output"
+    character(source)
+    assert main([
+        str(source), "-o", str(output), "--method", method,
+        "--texture-strength", "0.006", "--texture-scale", "2",
+        "--keep-isolated",
+    ]) == 0
+    report = latest_report(output)
+    assert report["parameters"]["method"] == method
+    assert report["parameters"]["keep_isolated"] is True
+    assert report["images"][0]["method"] == method
+    if method == "texture":
+        assert report["images"][0]["texture_strength"] == 0.006
+        assert report["images"][0]["texture_scale"] == 2

@@ -24,12 +24,14 @@ def make_rubbing(path: Path, dark=False):
 
 
 @pytest.mark.parametrize("dark", [False, True])
-def test_same_color_noise_and_thin_attached_branch_are_suppressed(tmp_path, dark):
+@pytest.mark.parametrize("method", ["morphology", "texture"])
+def test_same_color_noise_and_thin_attached_branch_are_suppressed(tmp_path, dark, method):
     path = tmp_path / "字.png"
     make_rubbing(path, dark)
     result = process_image(path, Options(
         foreground="dark" if dark else "light",
         stroke_radius=3, min_area=30, median_size=1,
+        method=method,
     ))
     assert result.candidate[5, 5] == 255
     assert result.mask[5, 5] == 0
@@ -112,5 +114,5 @@ def test_invalid_parameters(parameters):
 def test_bounded_edge_restoration_does_not_add_foreground(tmp_path):
     path = tmp_path / "source.png"
     make_rubbing(path)
-    result = process_image(path, Options(restore_steps=2))
+    result = process_image(path, Options(method="morphology", restore_steps=2))
     assert not np.any((result.mask > 0) & (result.candidate == 0))

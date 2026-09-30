@@ -5,7 +5,7 @@ from .processing import Result
 
 
 def comparison_tile(name: str, result: Result) -> Image.Image:
-    """Red=removed candidate; cyan=foreground added by an external mask."""
+    """Red=removed candidate; cyan=foreground added by smoothing or a mask."""
     overlay = np.asarray(result.original).copy()
     removed = (result.candidate > 0) & (result.mask == 0)
     added = (result.candidate == 0) & (result.mask > 0)

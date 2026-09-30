@@ -1,7 +1,7 @@
-"""Use stroke thickness and connected area to suppress rubbing texture.
+"""Extract candidate strokes using texture separation and geometric filters.
 
 The result is a candidate mask, not semantic identification of a character.
-Disconnected strokes are kept if they pass the same geometric filters.
+Disconnected strokes remain subject to area and optional proximity filtering.
 """
 
 from dataclasses import asdict, dataclass
@@ -10,6 +10,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
+
+from .texture import TEXTURE_PROFILES, smooth_texture, suppress_isolated_regions
 
 
 PROFILES = {
@@ -28,8 +30,14 @@ class Options:
     min_area: int | None = None
     median_size: int = 3
     restore_steps: int = 0
+    method: str = "texture"
+    texture_strength: float | None = None
+    texture_scale: float = 3.0
+    keep_isolated: bool = False
 
     def __post_init__(self):
+        if self.method not in {"texture", "morphology"}:
+            raise ValueError("处理方法必须为 texture 或 morphology")
         if self.profile not in PROFILES:
             raise ValueError("未知去噪强度")
         if self.foreground not in {"light", "dark"}:
@@ -44,6 +52,12 @@ class Options:
             raise ValueError("中值滤波尺寸必须为 1、3、5 或 7")
         if not 0 <= self.restore_steps <= 10:
             raise ValueError("边缘恢复步数必须在 0–10 之间")
+        if self.texture_strength is not None and (
+            not np.isfinite(self.texture_strength) or not 0 <= self.texture_strength <= 0.05
+        ):
+            raise ValueError("纹理平滑强度必须在 0–0.05 之间")
+        if not np.isfinite(self.texture_scale) or not 0.5 <= self.texture_scale <= 12:
+            raise ValueError("纹理尺度必须在 0.5–12 像素之间")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -89,7 +103,7 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
     threshold_type = cv2.THRESH_BINARY
     if options.threshold is None:
         threshold_type |= cv2.THRESH_OTSU
-    threshold, candidate = cv2.threshold(
+    candidate_threshold, candidate = cv2.threshold(
         foreground_gray, options.threshold or 0, 255, threshold_type
     )
     low_contrast = int(gray.max()) - int(gray.min()) < 3
@@ -97,6 +111,11 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
         candidate[:] = 0
 
     radius_ratio, area_ratio = PROFILES[options.profile]
+    strength, threshold_bias, texture_radius_ratio = TEXTURE_PROFILES[options.profile]
+    if options.method == "texture":
+        radius_ratio = texture_radius_ratio
+    if options.texture_strength is not None:
+        strength = options.texture_strength
     radius = options.stroke_radius
     if radius is None:
         radius = max(1, round(min(gray.shape) * radius_ratio))
@@ -104,6 +123,8 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
     if min_area is None:
         min_area = max(1, round(gray.size * area_ratio))
 
+    threshold = candidate_threshold
+    isolated_removed = 0
     if manual_mask is not None:
         with Image.open(manual_mask) as source:
             # External masks use white=character and black=background.
@@ -120,14 +141,26 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
             mask = (np.asarray(supplied.convert("L")) > 127).astype(np.uint8) * 255
         _, components = filter_components(mask, 0)
     else:
-        # Opening removes structures too thin to contain the selected disk.
-        # A full morphological reconstruction would also recover attached noise.
         mask = candidate.copy()
+        if options.method == "texture" and not low_contrast:
+            processed = smooth_texture(foreground_gray, strength, options.texture_scale)
+            if options.threshold is None:
+                threshold, _ = cv2.threshold(
+                    processed, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU
+                )
+                # Prefer the bright stroke interiors over intermediate texture.
+                # Clamp the percentile so sparse, bright strokes are never inverted.
+                high = max(threshold, float(np.percentile(processed, 95)))
+                threshold += threshold_bias * (high - threshold)
+            mask = (processed > threshold).astype(np.uint8) * 255
+        reconstruction_limit = mask.copy()
         if radius:
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, disk(radius))
         mask, _ = filter_components(mask, min_area)
         for _ in range(options.restore_steps):
-            mask = cv2.bitwise_and(cv2.dilate(mask, disk(1)), candidate)
+            mask = cv2.bitwise_and(cv2.dilate(mask, disk(1)), reconstruction_limit)
+        if options.method == "texture" and not options.keep_isolated:
+            mask, isolated_removed = suppress_isolated_regions(mask, min(gray.shape) * 0.08)
         mask, components = filter_components(mask, min_area)
 
     foreground_pixels = int(np.count_nonzero(mask))
@@ -146,10 +179,16 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
         reasons.append("删除比例较高，请检查细笔画是否被删除")
     if foreground_pixels / gray.size >= 0.6:
         reasons.append("白色区域占比较高，请检查前景方向和背景粘连")
+    if isolated_removed:
+        reasons.append("已筛除远离主体的小区域，请复核独立点画；可用 --keep-isolated 保留")
     metrics = {
         "width": original.width,
         "height": original.height,
         "threshold": float(threshold),
+        "candidate_threshold": float(candidate_threshold),
+        "texture_strength": strength if options.method == "texture" and manual_mask is None else None,
+        "texture_scale": options.texture_scale if options.method == "texture" and manual_mask is None else None,
+        "isolated_regions_removed": isolated_removed,
         "low_contrast": low_contrast,
         "stroke_radius": radius,
         "min_area": min_area,
@@ -159,7 +198,7 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
         "added_pixels": added_pixels,
         "removed_fraction": round(removed_fraction, 4),
         "components": components,
-        "method": "manual_mask" if manual_mask is not None else "stroke_structure",
+        "method": "manual_mask" if manual_mask is not None else options.method,
         "manual_mask": str(manual_mask) if manual_mask is not None else None,
         "needs_visual_review": True,
         "review_reasons": reasons,
