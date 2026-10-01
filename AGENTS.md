@@ -23,3 +23,5 @@ python app.py ../10-1dbe -o output/10-1dbe --preview
 `--augmentation complex` 使用 `degradation.py` 的多尺度碎斑、条纹、边缘污损和裂纹，形变标签采用软边缘覆盖度；默认 `simple` 保留首轮训练方式。`python -m hanzi_mask.synthesize` 可将训练条目导出为成对合成数据，绝不使用 test 作为背景或模板。多字清单可标记 `character` 和 `unseen_character`，后者不得与训练字符重叠。`--edge-sigma 0.7` 额外导出 `*-smooth` 二值掩膜和 `*-antialiased` 灰度展示图，原始输出继续保存在 train/test；抗锯齿图不可当作 0/255 掩膜。详见 `docs/MULTIGLYPH.md`。
 
 修改算法后检查代表性拓片对照图，并如实区分合成图测试、真实图片批处理和人工视觉验收。测试图片不得作为已验证语义正确的标注。提交说明遵循工作区根 `AGENTS.md`。
+
+使用生成式修复掩膜时，保留原始生成图、逐次提示词、最终选择和哈希记录，逐图检查与原图的位置及结构对应关系。尺寸相同不代表标签对齐；修复推断属于伪标签，不能声明为专家真值。按完整画布恢复原尺寸后生成 0/255 训练标签，另存高分辨率结果；测试图不参与生成。流程与配对训练对照见 `docs/IMAGEGEN_MASKS.md`。
