@@ -92,3 +92,22 @@ def test_loaded_checkpoint_rejects_changed_training_labels(tmp_path):
     manifest["train"][0]["mask_sha256"] = "changed"
     with pytest.raises(ValueError, match="掩膜"):
         check_checkpoint_sources(original, manifest)
+
+
+def test_complex_augmentation_preserves_soft_edge_targets(tmp_path):
+    path, _ = manifest_files(tmp_path)
+    manifest = read_manifest(path)
+    pairs = GlyphPairs(manifest["train"], 96, augmentation="complex")
+    images, targets = pairs.batch(np.random.default_rng(4), 2)
+    assert images.shape == targets.shape == (2, 1, 96, 96)
+    assert np.any((targets > 0) & (targets < 1))
+    assert np.isfinite(images).all()
+
+
+def test_unseen_character_claim_must_match_training_characters(tmp_path):
+    path, manifest = manifest_files(tmp_path)
+    manifest["train"][0]["character"] = "安"
+    manifest["test"][0].update(character="安", unseen_character=True)
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="未见字形"):
+        read_manifest(path)

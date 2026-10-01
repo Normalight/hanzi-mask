@@ -20,4 +20,6 @@ python app.py ../10-1dbe -o output/10-1dbe --preview
 
 配对监督实验入口为 `python -m hanzi_mask.supervised`，依赖 `requirements-training.txt`。`glyph_unet.py` 提供小型 U-Net，`supervised_data.py` 负责清单校验与合成退化。训练必须显式提供 image/mask 配对和独立 test 清单；原图内容重复或声明的来源 group 跨划分会拒绝运行。测试图不得用于生成训练背景、掩膜或选择检查点。合成验证使用训练字形的新噪声，只用于选择检查点，其 Dice 不代表真实测试准确率。输出、掩膜清单与权重放在 `output/`，不纳入 Git。`--checkpoint` 可只加载权重导出；运行说明见 `docs/SUPERVISED.md`。Torch 模型测试在依赖不可用时跳过，数据及核心测试仍运行。
 
+`--augmentation complex` 使用 `degradation.py` 的多尺度碎斑、条纹、边缘污损和裂纹，形变标签采用软边缘覆盖度；默认 `simple` 保留首轮训练方式。`python -m hanzi_mask.synthesize` 可将训练条目导出为成对合成数据，绝不使用 test 作为背景或模板。多字清单可标记 `character` 和 `unseen_character`，后者不得与训练字符重叠。`--edge-sigma 0.7` 额外导出 `*-smooth` 二值掩膜和 `*-antialiased` 灰度展示图，原始输出继续保存在 train/test；抗锯齿图不可当作 0/255 掩膜。详见 `docs/MULTIGLYPH.md`。
+
 修改算法后检查代表性拓片对照图，并如实区分合成图测试、真实图片批处理和人工视觉验收。测试图片不得作为已验证语义正确的标注。提交说明遵循工作区根 `AGENTS.md`。

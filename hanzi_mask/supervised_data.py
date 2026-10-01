@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from .processing import load_image
+from .degradation import complex_rubbing
 
 
 def digest(path):
@@ -25,6 +26,10 @@ def read_manifest(path):
     train_groups = {item["group"] for item in manifest["train"] if item.get("group")}
     if any(item.get("group") in train_groups for item in manifest["test"]):
         raise ValueError("同一来源组跨越训练与测试，可能存在缩放副本或同页泄漏")
+    train_characters = {item.get("character") for item in manifest["train"]}
+    for item in manifest["test"]:
+        if item.get("unseen_character") and (not item.get("character") or item["character"] in train_characters):
+            raise ValueError("未见字形标记与训练字符集合冲突")
     for split in ("train", "test"):
         output_names = set()
         for item in manifest[split]:
@@ -83,14 +88,17 @@ def check_checkpoint_sources(training_sources, manifest):
 
 
 class GlyphPairs:
-    def __init__(self, training, size=192):
+    def __init__(self, training, size=192, augmentation="simple"):
+        if augmentation not in {"simple", "complex"}:
+            raise ValueError("未知增强方式")
+        self.augmentation = augmentation
         self.size = size
         self.templates = []
         for item in training:
             original = load_image(Path(item["image"]), "light")
             gray, _ = letterbox(normalize(np.asarray(original.convert("L"))), size)
             with Image.open(item["mask"]) as mask:
-                target, _ = letterbox(np.asarray(mask.convert("L")), size, nearest=True)
+                target, _ = letterbox(np.asarray(mask.convert("L")), size, nearest=augmentation == "simple")
             self.templates.append((gray, target.astype(np.float32) / 255))
 
     def sample(self, rng):
@@ -101,12 +109,16 @@ class GlyphPairs:
         matrix[0, :2] *= rng.uniform(.85, 1.12)
         matrix[:, 2] += rng.uniform(-.06, .06, 2) * s
         gray = cv2.warpAffine(gray, matrix, (s, s))
-        target = cv2.warpAffine(target, matrix, (s, s), flags=cv2.INTER_NEAREST)
+        label_interpolation = cv2.INTER_NEAREST if self.augmentation == "simple" else cv2.INTER_LINEAR
+        target = cv2.warpAffine(target, matrix, (s, s), flags=label_interpolation)
         yy, xx = np.mgrid[:s, :s].astype(np.float32)
         dx = cv2.resize(rng.normal(0, 1.5, (5, 5)).astype(np.float32), (s, s))
         dy = cv2.resize(rng.normal(0, 1.5, (5, 5)).astype(np.float32), (s, s))
         gray = cv2.remap(gray, xx + dx, yy + dy, cv2.INTER_LINEAR)
-        target = cv2.remap(target, xx + dx, yy + dy, cv2.INTER_NEAREST)
+        target = cv2.remap(target, xx + dx, yy + dy, label_interpolation)
+        if self.augmentation == "complex":
+            noisy = complex_rubbing(gray, target, rng)
+            return noisy[None], target.astype(np.float32)[None]
         # Mix real clean-image texture with synthetic strokes/backgrounds.
         bg, fg = rng.uniform(.05, .3), rng.uniform(.65, .98)
         base = bg + (fg - bg) * target

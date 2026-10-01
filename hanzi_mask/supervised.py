@@ -14,6 +14,7 @@ import torch
 from .cli import image_bytes, write_output
 from .docentr import preview_tile
 from .glyph_unet import GlyphUNet, segmentation_loss
+from .edges import render_edges
 from .processing import Options, load_image, process_image
 from .supervised_data import GlyphPairs, check_checkpoint_sources, digest, letterbox, normalize, read_manifest
 
@@ -39,7 +40,7 @@ def validate(model, batches, device):
     return 2 * intersections / max(1, predicted + actual)
 
 
-def export(model, manifest, output, size, device):
+def export(model, manifest, output, size, device, edge_sigma=0):
     rows, records, pages = [], [], []
 
     def flush():
@@ -61,6 +62,10 @@ def export(model, manifest, output, size, device):
             mask = (scores > .5).astype(np.uint8) * 255
             name = path.with_suffix(".png").name
             write_output(output / split / name, image_bytes(Image.fromarray(mask), "PNG"))
+            if edge_sigma:
+                smooth, antialiased = render_edges(scores, edge_sigma)
+                write_output(output / (split + "-smooth") / name, image_bytes(Image.fromarray(smooth), "PNG"))
+                write_output(output / (split + "-antialiased") / name, image_bytes(Image.fromarray(antialiased), "PNG"))
             write_output(output / (split + "-scores") / name,
                          image_bytes(Image.fromarray(np.rint(scores * 255).astype(np.uint8)), "PNG"))
             texture = process_image(path, Options()).mask
@@ -84,9 +89,13 @@ def main(argv=None):
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--size", type=int, default=192)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--augmentation", choices=["simple", "complex"], default="simple")
+    parser.add_argument("--edge-sigma", type=float, default=0, help="额外导出平滑二值与抗锯齿图，0 关闭；0–3 原图像素")
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
     parser.add_argument("--checkpoint", type=Path, help="只加载已训练模型并导出，不继续训练")
     args = parser.parse_args(argv)
+    if not np.isfinite(args.edge_sigma) or not 0 <= args.edge_sigma <= 3:
+        parser.error("edge-sigma 须为 0–3")
     if args.size < 64 or args.size > 512 or args.size % 16 or args.steps < 1 or args.batch_size < 1:
         parser.error("size 须为 64–512 的 16 倍数，steps 和 batch-size 须大于零")
     try:
@@ -128,7 +137,7 @@ def main(argv=None):
     else:
         # Only training entries are passed here. Synthetic validation uses fresh
         # noise seeds on the SAME clean glyphs, not an independent real dataset.
-        pairs = GlyphPairs(manifest["train"], args.size)
+        pairs = GlyphPairs(manifest["train"], args.size, args.augmentation)
         rng, val_rng = np.random.default_rng(args.seed), np.random.default_rng(args.seed + 100000)
         batches = [pairs.batch(val_rng, args.batch_size) for _ in range(4)]
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
@@ -145,6 +154,14 @@ def main(argv=None):
         for i, row in enumerate(examples):
             page.paste(row, (0, i * 250))
         write_output(output / "synthetic-examples.png", image_bytes(page, "PNG"))
+        # Export reusable paired examples, including edge coverage for soft targets.
+        for batch_index, (inputs, targets) in enumerate(batches):
+            for index, (input_image, target_image) in enumerate(zip(inputs, targets)):
+                name = f"{batch_index * args.batch_size + index:04d}.png"
+                for folder, values in (("images", input_image[0]), ("soft-masks", target_image[0]),
+                                       ("masks", (target_image[0] > .5).astype(np.float32))):
+                    write_output(output / "synthetic-pairs" / folder / name,
+                                 image_bytes(Image.fromarray(np.rint(values * 255).astype(np.uint8)), "PNG"))
         for step in range(1, args.steps + 1):
             model.train()
             images, masks = pairs.batch(rng, args.batch_size)
@@ -165,18 +182,21 @@ def main(argv=None):
                     best_dice, best_step = dice, step
                     torch.save({"model": {k: v.cpu() for k, v in model.state_dict().items()},
                                 "size": args.size, "step": step, "synthetic_validation_dice": dice,
+                                "augmentation": args.augmentation,
                                 "training_sources": manifest["train"]}, checkpoint)
                 write_output(output / "history.json", json.dumps(history, indent=2).encode(), overwrite=True)
                 print(json.dumps(record), flush=True)
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)
         model.load_state_dict(state["model"], strict=True)
     model.eval()
-    records, pages = export(model, manifest, output, args.size, device)
+    records, pages = export(model, manifest, output, args.size, device, args.edge_sigma)
     report = {"manifest": manifest, "model": "GlyphUNet width=16", "device": device,
               "torch": torch.__version__, "seed": args.seed, "size": args.size,
               "best_step": best_step, "synthetic_validation_dice": best_dice,
               "validation_note": "相同训练字形的新合成噪声，不代表独立真实图准确率",
               "test_ground_truth": None, "threshold": .5, "postprocessing": "none",
+              "augmentation": state.get("augmentation", "simple"), "edge_sigma": args.edge_sigma,
+              "edge_note": "raw 保存在 train/test；smooth 为二值；antialiased 为灰度展示图",
               "elapsed_seconds": round(time.perf_counter() - started, 2),
               "checkpoint": str(args.checkpoint.resolve() if args.checkpoint else checkpoint),
               "checkpoint_sha256": digest(args.checkpoint or checkpoint), "previews": pages, "results": records}
