@@ -107,3 +107,27 @@ def test_manual_mask_bypasses_texture_processing(tmp_path, monkeypatch):
     assert np.array_equal(result.mask, np.asarray(source))
     assert result.metrics["method"] == "manual_mask"
     assert result.metrics["texture_strength"] is None
+
+
+def test_color_gate_rejects_monochrome_uniform_and_conflicting_hues():
+    from hanzi_mask.texture import colored_foreground_signal
+    image = np.full((100, 100, 3), 80, dtype=np.uint8)
+    assert colored_foreground_signal(image)[0] is None
+    image[:] = (180, 40, 40)
+    assert colored_foreground_signal(image)[0] is None
+    image[:] = 80
+    image[15:85, 30:48] = (180, 40, 40)
+    image[15:85, 52:70] = (40, 70, 230)
+    assert colored_foreground_signal(image)[0] is None
+
+
+def test_color_hue_wraparound_preserves_both_sides_of_red():
+    from hanzi_mask.texture import colored_foreground_signal
+    image = np.full((100, 100, 3), 80, dtype=np.uint8)
+    image[15:85, 30:48] = (180, 40, 45)
+    image[15:85, 48:66] = (180, 45, 40)
+    signal, evidence = colored_foreground_signal(image)
+    assert signal is not None
+    assert signal[30, 40] > 200 and signal[30, 55] > 200
+    assert signal[5, 5] == 0
+    assert evidence["hue_coherence"] == 1.0

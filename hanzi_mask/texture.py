@@ -109,3 +109,57 @@ def suppress_isolated_regions(mask: np.ndarray, gap: float) -> tuple[np.ndarray,
     keep[0] = False
     removed_count = int(np.count_nonzero(~keep[1:]))
     return keep[labels].astype(np.uint8) * 255, removed_count
+
+
+def colored_foreground_signal(rgb: np.ndarray) -> tuple[np.ndarray | None, dict]:
+    """Find a coherent colored stroke signal against predominantly neutral stone.
+
+    This is a color-evidence gate, not a semantic character detector. A colored
+    minority must cover a substantial central extent, share one hue and sit on a
+    mostly low-chroma background. RGB chroma rejects similarly bright gray
+    stone; hue weighting rejects colored fragments with a different hue.
+    Monochrome and heavily tinted images continue using their luminance signal.
+    """
+    if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8 or not rgb.size:
+        raise ValueError("颜色前景检测需要非空的 uint8 RGB 图")
+    chroma = rgb.max(axis=2).astype(np.float32) - rgb.min(axis=2)
+    neutral_fraction = float(np.mean(chroma <= 24))
+    if neutral_fraction < 0.5 or float(chroma.max()) < 42:
+        return None, {}
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    hue = hsv[:, :, 0].astype(np.float32)
+    seeds = (chroma >= 42) & (hsv[:, :, 1] >= 85) & (hsv[:, :, 2] >= 40)
+    colored_fraction = float(np.mean(seeds))
+    if not 0.025 <= colored_fraction <= 0.45:
+        return None, {}
+    histogram = np.bincount(hue[seeds].astype(np.int32), weights=chroma[seeds], minlength=180)
+    neighborhood = sum(np.roll(histogram, shift) for shift in range(-10, 11))
+    dominant_hue = int(neighborhood.argmax())
+    difference = np.abs(hue - dominant_hue)
+    difference = np.minimum(difference, 180 - difference)
+    consistent = seeds & (difference <= 10)
+    coherence = float(chroma[consistent].sum() / chroma[seeds].sum())
+    if coherence < 0.8 or np.mean(consistent) < 0.025:
+        return None, {}
+    # Dismiss tiny colored marks; the signal must occupy a plausible glyph area.
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(consistent.astype(np.uint8), connectivity=8)
+    substantial = stats[:, cv2.CC_STAT_AREA] >= max(3, round(chroma.size * 0.005))
+    substantial[0] = False
+    rows, columns = np.nonzero(substantial[labels])
+    if not rows.size or np.ptp(columns) + 1 < rgb.shape[1] * 0.3 or np.ptp(rows) + 1 < rgb.shape[0] * 0.4:
+        return None, {}
+    # A colored frame or border must not displace an interior neutral glyph.
+    border = np.zeros(chroma.shape, dtype=bool)
+    border[[0, -1], :] = True
+    border[:, [0, -1]] = True
+    if np.mean(consistent[border]) > 0.4:
+        return None, {}
+    hue_weight = np.exp(-0.5 * (difference / 12.0) ** 2)
+    scale = 255.0 / max(64.0, float(np.percentile(chroma[consistent], 95)))
+    signal = np.clip(np.rint(chroma * hue_weight * scale), 0, 255).astype(np.uint8)
+    return signal, {
+        "dominant_hue_degrees": dominant_hue * 2,
+        "neutral_background_fraction": round(neutral_fraction, 4),
+        "colored_seed_fraction": round(float(np.mean(consistent)), 4),
+        "hue_coherence": round(coherence, 4),
+    }

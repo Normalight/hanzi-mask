@@ -1,8 +1,10 @@
-# 拓片字形掩膜工具
+# 字形替换客户端与掩膜工具
 
-从已切好的单字拓片中提取候选字形，批量导出纯黑背景、纯白前景的 PNG。保留原图尺寸和文件名主体，原图只读。默认命令行流程不需要模型或远程服务；可选的 [DocEnTr 免训练实验](docs/DOCENTR.md) 使用单独下载的预训练权重在本地推理。
+从已切好的单字拓片中提取候选字形，批量导出纯黑背景、纯白前景的 PNG。桌面客户端提供三栏预览、逐图复核、导出副本和带备份的原位替换。使用本地 `texture`，无需模型或远程服务。命令行接口继续可用；可选的 [DocEnTr 免训练实验](docs/DOCENTR.md) 使用单独下载的预训练权重在本地推理。
 
 斑点与笔画可能同色。默认的 `texture` 方法先做 RTV 风格的纹理与结构分离，再筛选笔画尺度、连通区域面积及空间邻近关系。输出仍需视觉复核：粗斑、粘连和残损笔画可能处理错误，较强平滑也可能合并细节或改变轮廓。算法没有识别字符含义，不能保证得到准确的真实字形。
+
+中性石面上的红色等着色字，在颜色证据充足时先使用颜色差异提取前景，再运行 texture 与区域筛选，避免灰度亮度接近导致主体消失。普通灰度拓片继续使用原有亮度流程；同色污渍仍需复核。
 
 方法调研、来源与设计取舍见 [研究说明](docs/METHODS.md)。
 
@@ -19,10 +21,41 @@ Python 3.11 或以上。在本项目目录运行：
 ```sh
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python app.py ../10-1dbe -o output/10-1dbe-texture --method texture --preview
+.venv/bin/python app.py
 ```
 
 Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/python` 替换为 `.venv\Scripts\python.exe`。
+
+客户端操作：
+
+1. 添加图片、文件夹，或直接拖入窗口；默认扫描子文件夹。
+2. 先处理当前图片，查看原图、黑底白字和变化对照；预览始终适配窗口。
+3. 拖动强度滑块，向左保留细节、向右加强去噪。默认停止拖动后处理当前图；可关闭自动处理。点击“恢复默认强度”回到推荐值；其他算法参数采用内部默认值。修改强度会清除旧结果和人工矫正，批量处理使用当前统一强度。
+4. 批量处理后筛选“待复核”，检查细笔画、独立点画和残留碎斑。点击中间结果的前景色块选中一个连通区域，点击“清理选中色块”或按 Delete 清除；可用 Ctrl/Command 多选。背景点击取消选择，“撤销清理”恢复当前图上一步，最多保留 20 步。矫正后的结果参与导出或替换；勾选“采用”决定保存哪些图片。
+5. 默认导出副本。选择“原位替换 PNG”时，确认后先备份全部采用项，再替换原图。取消或失败会尝试回滚；通过“恢复上次替换”或选择 `replacement.json` 恢复原始文件。
+
+中间结果可通过右键菜单切换黑底/白底预览：黑底点击白色，白底点击黑色；保存始终使用黑底白字。色块按 8 邻域连通性选取，和笔画粘连的斑点会与笔画一起选中，清理前可查看高亮范围，误删后撤销。
+
+每次保存创建独立运行目录。副本位于 `images/`，保存报告为 `report.json`；替换备份位于 `originals/`，恢复清单为 `replacement.json`。保存目录可放在输入目录的子文件夹中，扫描时会排除它；不能选择输入目录本身或包含输入的上级目录。原位替换仅支持真实 PNG，其他格式需导出副本。处理后原图有变化时会拒绝替换；恢复也会校验当前文件和备份，避免覆盖外部修改。
+
+处理、扫描和保存均在后台运行。取消会等待当前图片结束；关闭窗口会等待后台任务或回滚完成，再清理临时缓存。客户端按图缓存结果，只加载当前预览；批量计算采用有限并发。恢复原图期间会完成当前恢复任务再关闭。
+
+准备本地示例并直接打开：
+
+```sh
+.venv/bin/python tools/prepare_client_examples.py
+.venv/bin/python app.py --gui --examples
+```
+
+默认抽取最多 13 张工作区中的多种字形、尺寸和纹理，包含可用的红字案例，原图只复制。示例位于 `output/client-examples/`，点击“加载示例”即可导入；`expected/` 是同参数的候选输出，`preview-*.jpg` 是对照图，不代表人工真值。输出目录已存在时使用 `-o output/examples-new` 保留旧示例。其他机器可通过 `--source /path/to/images --count 12` 指定自己的图片。
+
+## 命令行使用
+
+带参数运行 `app.py` 保留原命令行行为，`python -m hanzi_mask` 始终是命令行入口：
+
+```sh
+.venv/bin/python app.py ../10-1dbe -o output/10-1dbe-texture --method texture --preview
+```
 
 输出文件夹包含：
 
@@ -104,7 +137,7 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 ```sh
 .venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 ```
 
 也可以安装项目并使用 `hanzi-mask` 命令：
@@ -112,8 +145,9 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 ```sh
 .venv/bin/python -m pip install -e .
 .venv/bin/hanzi-mask --help
+.venv/bin/hanzi-mask-desktop
 ```
 
 退出码：`0` 表示处理完成（包含跳过已有输出），`1` 表示存在文件处理或写入失败，`2` 表示参数或路径错误。单图失败会记录在报告中，继续处理其他图片。
 
-`hanzi_mask/processing.py` 负责处理流程，`hanzi_mask/texture.py` 负责纹理分离与空间区域筛选，`hanzi_mask/cli.py` 负责批处理，`hanzi_mask/preview.py` 负责对照图。`tests/` 覆盖纹理抑制与边缘保留、断开的部件、图像尺寸、透明背景、EXIF、人工掩膜和文件写入保护。合成测试验证处理规则，真实图片效果需逐图查看；尚未对真实数据评估分割准确率。
+`ui/window.py` 负责桌面流程，`ui/canvas.py` 负责适配预览与色块选择，`ui/task_worker.py` 负责后台任务；`hanzi_mask/batch_service.py` 负责桌面批处理、缓存、导出、备份替换和恢复，`hanzi_mask/manual_correction.py` 负责独立的人工矫正缓存版本。`hanzi_mask/processing.py` 负责处理流程，`hanzi_mask/texture.py` 负责纹理分离与空间区域筛选，`hanzi_mask/cli.py` 负责命令行批处理，`hanzi_mask/preview.py` 负责对照图。`tests/` 覆盖算法规则、异步关闭、色块选择与撤销、复核选择、导出、替换回滚及恢复。合成测试验证处理规则，真实图片效果需逐图查看；尚未对真实数据评估分割准确率。

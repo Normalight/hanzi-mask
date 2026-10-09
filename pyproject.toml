@@ -4,21 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hanzi-mask"
-version = "0.2.0"
-description = "拓片单字候选掩膜提取与黑底白字导出"
+version = "0.3.0"
+description = "拓片单字 texture 桌面复核、批量字形替换与黑底白字导出"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26,<3",
   "opencv-python-headless>=4.10,<5",
   "Pillow>=10.4,<13",
   "scipy>=1.11,<2",
+  "PySide6>=6.6,<7",
 ]
 
 [project.scripts]
 hanzi-mask = "hanzi_mask.cli:main"
+hanzi-mask-desktop = "ui.window:main"
 
 [tool.setuptools.packages.find]
-include = ["hanzi_mask*"]
+include = ["hanzi_mask*", "ui*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,4 +1,4 @@
-"""Extract candidate strokes using texture separation and geometric filters.
+"""Extract candidate strokes using color evidence, texture and geometric filters.
 
 The result is a candidate mask, not semantic identification of a character.
 Disconnected strokes remain subject to area and optional proximity filtering.
@@ -11,7 +11,9 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-from .texture import TEXTURE_PROFILES, smooth_texture, suppress_isolated_regions
+from .texture import (
+    TEXTURE_PROFILES, colored_foreground_signal, smooth_texture, suppress_isolated_regions,
+)
 
 
 PROFILES = {
@@ -95,18 +97,26 @@ def filter_components(mask: np.ndarray, min_area: int) -> tuple[np.ndarray, int]
 def process_image(path: Path, options: Options, manual_mask: Path | None = None) -> Result:
     original = load_image(path, options.foreground)
     gray = np.asarray(original.convert("L"))
+    color_signal, color_evidence = None, {}
+    if options.method == "texture" and manual_mask is None:
+        color_signal, color_evidence = colored_foreground_signal(np.asarray(original))
     if options.median_size > 1:
         gray = cv2.medianBlur(gray, options.median_size)
 
     # Make the foreground bright internally, regardless of input polarity.
     foreground_gray = gray if options.foreground == "light" else 255 - gray
+    if color_signal is not None:
+        # Hue/chroma identify painted strokes independently of light/dark polarity.
+        foreground_gray = color_signal
+        if options.median_size > 1:
+            foreground_gray = cv2.medianBlur(foreground_gray, options.median_size)
     threshold_type = cv2.THRESH_BINARY
     if options.threshold is None:
         threshold_type |= cv2.THRESH_OTSU
     candidate_threshold, candidate = cv2.threshold(
         foreground_gray, options.threshold or 0, 255, threshold_type
     )
-    low_contrast = int(gray.max()) - int(gray.min()) < 3
+    low_contrast = int(foreground_gray.max()) - int(foreground_gray.min()) < 3
     if low_contrast:
         candidate[:] = 0
 
@@ -179,6 +189,8 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
         reasons.append("删除比例较高，请检查细笔画是否被删除")
     if foreground_pixels / gray.size >= 0.6:
         reasons.append("白色区域占比较高，请检查前景方向和背景粘连")
+    if color_signal is not None:
+        reasons.append("已依据主体颜色与中性石面的差异提取，请复核同色污渍和点画")
     if isolated_removed:
         reasons.append("已筛除远离主体的小区域，请复核独立点画；可用 --keep-isolated 保留")
     metrics = {
@@ -186,6 +198,8 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
         "height": original.height,
         "threshold": float(threshold),
         "candidate_threshold": float(candidate_threshold),
+        "foreground_signal": "color" if color_signal is not None else "luminance",
+        "color_evidence": color_evidence,
         "texture_strength": strength if options.method == "texture" and manual_mask is None else None,
         "texture_scale": options.texture_scale if options.method == "texture" and manual_mask is None else None,
         "isolated_regions_removed": isolated_removed,
