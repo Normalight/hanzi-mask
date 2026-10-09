@@ -188,3 +188,118 @@ def test_manual_mask_still_ignores_color_inference(tmp_path):
     result = process_image(path, Options(), mask)
     assert result.metrics["foreground_signal"] == "luminance"
     assert np.array_equal(result.mask, np.asarray(expected))
+
+
+@pytest.mark.parametrize('kind,reason', [
+    ('manual', 'skipped_manual_mask'),
+    ('morphology', 'skipped_non_texture'),
+    ('threshold', 'skipped_explicit_threshold'),
+    ('uniform', 'skipped_low_contrast'),
+])
+def test_recovery_helpers_bypass_inapplicable_inputs(tmp_path, monkeypatch, kind, reason):
+    def unexpected(*args, **kwargs):
+        pytest.fail('weak-structure and tip recovery must skip this processing mode')
+
+    monkeypatch.setattr('hanzi_mask.processing.recover_strokes', unexpected)
+    monkeypatch.setattr('hanzi_mask.processing.preserve_tips', unexpected)
+    path = tmp_path / 'source.png'
+    make_rubbing(path)
+    if kind == 'uniform':
+        Image.new('L', (40, 50), 127).save(path)
+    options = Options(
+        method='morphology' if kind == 'morphology' else 'texture',
+        threshold=120 if kind == 'threshold' else None,
+        stroke_recovery=True, tip_recovery=True, texture_strength=0,
+    )
+    result = process_image(path, options, path if kind == 'manual' else None)
+    assert result.metrics['stroke_recovery_reason'] == reason
+    assert result.metrics['tip_recovery_reason'] == reason
+    assert result.metrics['stroke_recovery_final_surviving_added_pixels'] == 0
+    assert result.metrics['tip_added_pixels'] == 0
+
+
+def test_cli_default_keeps_desktop_recovery_features_disabled(tmp_path):
+    import json
+    from hanzi_mask.cli import main
+
+    source, output = tmp_path / 'source.png', tmp_path / 'export'
+    make_rubbing(source)
+    assert main([str(source), '-o', str(output)]) == 0
+    report = json.loads(next(output.glob('report-*.json')).read_text())
+    for name in ('edge_refine', 'stroke_recovery', 'tip_recovery'):
+        assert report['parameters'][name] is False
+    metrics = report['images'][0]
+    assert metrics['edge_refinement_enabled'] is False
+    assert metrics['stroke_recovery_enabled'] is False
+    assert metrics['tip_recovery_enabled'] is False
+
+
+def test_edge_guide_uses_unmedianed_original_dark_foreground(tmp_path, monkeypatch):
+    source = tmp_path / 'dark.png'
+    raw = np.full((50, 70), 230, dtype=np.uint8)
+    raw[10:42, 28:41] = 20
+    raw[6, 6] = 20  # This single pixel disappears under the median filter.
+    Image.fromarray(raw).save(source)
+    captured = []
+
+    def inspect(mask, guide):
+        captured.append(guide.copy())
+        return mask.copy(), {'edge_refinement_enabled': True, 'edge_changed_pixels': 0}
+
+    monkeypatch.setattr('hanzi_mask.processing.refine_edges', inspect)
+    result = process_image(source, Options(foreground='dark', edge_refine=True, texture_strength=0))
+    np.testing.assert_array_equal(captured[0], 255 - raw)
+    assert result.candidate[6, 6] == 0
+
+
+def test_tip_is_last_geometry_stage_and_final_metrics_include_its_addition(tmp_path, monkeypatch):
+    source = tmp_path / 'source.png'
+    make_rubbing(source)
+    stages = []
+
+    def edge(mask, guide):
+        stages.append('edge')
+        return mask.copy(), {'edge_refinement_enabled': True, 'edge_changed_pixels': 0}
+
+    def tip(mask, guide, *, stroke_radius):
+        stages.append('tip')
+        assert mask[60, 48] == 255 and mask[60, 49] == 0
+        result = mask.copy()
+        result[60, 49] = 255
+        return result, {'tip_recovery_enabled': True, 'tip_added_pixels': 1}
+
+    monkeypatch.setattr('hanzi_mask.processing.refine_edges', edge)
+    monkeypatch.setattr('hanzi_mask.processing.preserve_tips', tip)
+    result = process_image(source, Options(
+        edge_refine=True, tip_recovery=True, texture_strength=0,
+        stroke_radius=3, min_area=30, keep_isolated=True,
+    ))
+    assert stages == ['edge', 'tip']
+    assert result.mask[60, 49] == 255
+    assert result.metrics['tip_added_pixels'] == 1
+    assert result.metrics['foreground_pixels'] == np.count_nonzero(result.mask)
+
+
+def test_recovery_added_count_distinguishes_geometry_survival(tmp_path, monkeypatch):
+    source = tmp_path / 'source.png'
+    make_rubbing(source)
+
+    def recovery(structure, seeds, candidate, **kwargs):
+        # Isolate stage accounting from adaptive threshold selection: an accepted
+        # addition attached to a tiny fragment must still undergo width pruning.
+        additions = np.zeros(seeds.shape, dtype=np.uint8)
+        assert seeds[4, 4] == 0
+        additions[4, 4] = 255
+        return seeds | additions, additions, {
+            'stroke_recovery_enabled': True,
+            'stroke_recovery_added_pixels_before_geometry': 1,
+            'stroke_recovery_final_surviving_added_pixels': 0,
+        }
+
+    monkeypatch.setattr('hanzi_mask.processing.recover_strokes', recovery)
+    result = process_image(source, Options(
+        stroke_recovery=True, texture_strength=0, stroke_radius=3, min_area=30,
+    ))
+    assert result.mask[4, 4] == 0
+    assert result.metrics['stroke_recovery_added_pixels_before_geometry'] == 1
+    assert result.metrics['stroke_recovery_final_surviving_added_pixels'] == 0

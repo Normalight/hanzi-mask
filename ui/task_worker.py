@@ -34,7 +34,9 @@ class TaskWorker(QThread):
                                      cancel=self.isInterruptionRequested)
             elif self.operation == "process":
                 result = process_batch(p["inputs"], p["options"], self.isInterruptionRequested,
-                                       progress, p["cache_dir"], self.item_ready.emit)
+                                       progress, p["cache_dir"], self.item_ready.emit,
+                                       max_workers=p.get("max_workers"),
+                                       per_image_options=p.get("per_image_options"))
             elif self.operation == "export":
                 result = export_batch(p["batch"], p["directory"], self.isInterruptionRequested, progress)
             elif self.operation == "replace":

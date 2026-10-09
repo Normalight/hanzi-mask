@@ -118,10 +118,15 @@ class ImageCanvas(QWidget):
 
 
 class MaskCanvas(ImageCanvas):
-    """Select complete 8-connected white components using image coordinates."""
+    """Select binary components, with narrow interpolation only when painting.
+
+    Fitting a small mask uses the painter's local pixel interpolation at edges.
+    The owned mask and QImage still contain the original 0/255 pixels; exported
+    original-size binary images retain their native pixel-grid resolution.
+    """
 
     def __init__(self, panel, parent=None):
-        super().__init__(panel, smooth=False, parent=parent)
+        super().__init__(panel, smooth=True, parent=parent)
         self._mask = None
         self._labels = None
         self._areas = None
@@ -215,7 +220,7 @@ class MaskCanvas(ImageCanvas):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.setFocus()
+            self.setFocus(Qt.MouseFocusReason)
             self._select_position(event.position(), event.modifiers())
             event.accept()
             return
@@ -223,6 +228,7 @@ class MaskCanvas(ImageCanvas):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self.setFocus(Qt.MouseFocusReason)
             self._select_position(event.position(), event.modifiers())
             event.accept()
             return
@@ -241,7 +247,7 @@ class MaskCanvas(ImageCanvas):
 
     def _paint_overlay(self, painter):
         if not self._selection_overlay.isNull():
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, self.smooth)
             painter.drawImage(self.image_rect(), self._selection_overlay)
 
     def _background_color(self):
@@ -278,7 +284,7 @@ class PreviewPanel(QWidget):
             layout.addWidget(label)
             if index == 1:
                 self.mask_title = label
-                label.setToolTip("点击字形或杂斑选中整块；Ctrl/Command 可多选；右键切换底色；Delete 清理")
+                label.setToolTip("点击字形或杂斑选中整块；Ctrl/Command 可多选；右键切换底色；退格/Delete 清理")
                 canvas = MaskCanvas(self, parent=column)
             else:
                 canvas = ImageCanvas(self, placeholder="请选择图片" if index == 0 else "未处理",

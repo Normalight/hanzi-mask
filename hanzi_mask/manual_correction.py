@@ -40,7 +40,7 @@ def apply_correction(item: ProcessedImage, mask: np.ndarray,
     if not mask.size or not np.isin(mask, [0, 255]).all():
         raise ValueError("人工矫正掩膜只能包含 0 和 255")
     corrected = mask.copy()
-    result = load_result(item)
+    result = load_result(item, item.options.foreground if item.options is not None else "light")
     expected = (result.original.height, result.original.width)
     if corrected.shape != expected:
         raise ValueError(f"人工矫正掩膜尺寸必须与原图一致：{expected}")
@@ -50,6 +50,8 @@ def apply_correction(item: ProcessedImage, mask: np.ndarray,
         raise ValueError("原处理结果尺寸不正确，请重新处理图片")
 
     metrics = deepcopy(item.metrics or result.metrics)
+    if item.options is not None:
+        metrics["parameters"] = item.options.to_dict()
     pixels = int(np.count_nonzero(corrected))
     candidate_pixels = int(np.count_nonzero(candidate))
     removed = int(np.count_nonzero((candidate > 0) & (corrected == 0)))
@@ -109,4 +111,4 @@ def apply_correction(item: ProcessedImage, mask: np.ndarray,
         shutil.rmtree(directory)
         raise
     return ProcessedImage(item.source, None, item.source_sha256,
-                          mask_path, candidate_path, metrics)
+                          mask_path, candidate_path, metrics, options=item.options)

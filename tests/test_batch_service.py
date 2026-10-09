@@ -9,6 +9,7 @@ from PIL import Image, PngImagePlugin
 import pytest
 
 from hanzi_mask import batch_service as service
+from hanzi_mask.concurrency import WorkerLimits
 from hanzi_mask.processing import Options
 
 
@@ -485,3 +486,245 @@ def test_scan_cancellation_happens_before_walking_and_during_nested_walk(tmp_pat
     with pytest.raises(service.ScanCancelled):
         service.scan_inputs([root], recursive=True, cancel=cancel_midway)
     assert called
+
+
+@pytest.mark.parametrize("cached,workers", [(False, 1), (True, 1), (True, 2)])
+def test_per_image_parameters_control_results_and_survive_cache(
+        tmp_path, options, cached, workers):
+    files = [make_image(tmp_path / f"{index}.png") for index in range(2)]
+    sources = service.scan_inputs(files)
+    low = replace(options, threshold=100, median_size=1)
+    high = replace(options, threshold=230, median_size=1)
+    # A path alias must select the same normalized source, not a separate job.
+    alias = files[1].parent / "unused" / ".." / files[1].name
+    batch = service.process_batch(
+        sources, options, cache_dir=tmp_path / "cache" if cached else None,
+        max_workers=workers, per_image_options={files[0]: low, alias: high})
+    assert not batch.errors and not batch.cancelled
+    assert batch.options == options
+    assert [item.options for item in batch.items] == [low, high]
+    for item in batch.items:
+        assert item.metrics["parameters"] == item.options.to_dict()
+        if cached:
+            assert item.result is None
+            assert read_report(item.mask_path.parent / "metrics.json")["parameters"] == item.options.to_dict()
+        else:
+            assert item.result.metrics["parameters"] == item.options.to_dict()
+    low_mask, high_mask = map(service.load_mask, batch.items)
+    assert low_mask[5, 8] == 255 and high_mask[5, 8] == 0
+    assert np.count_nonzero(low_mask) > np.count_nonzero(high_mask)
+
+
+def test_per_image_mapping_is_frozen_before_processing(tmp_path, options, monkeypatch):
+    sources = service.scan_inputs([make_image(tmp_path / f"{index}.png") for index in range(2)])
+    actual = replace(options, threshold=100)
+    changed = replace(options, threshold=250)
+    drafts = {source.path: actual for source in sources}
+    real_process = service.process_single
+
+    def edit_draft_while_processing(source, opts):
+        if source == sources[0]:
+            drafts[sources[1].path] = changed
+        return real_process(source, opts)
+
+    monkeypatch.setattr(service, "process_single", edit_draft_while_processing)
+    batch = service.process_batch(sources, options, per_image_options=drafts)
+    assert drafts[sources[1].path] == changed
+    assert [item.options for item in batch.items] == [actual, actual]
+    assert np.array_equal(service.load_mask(batch.items[0]), service.load_mask(batch.items[1]))
+
+
+@pytest.mark.parametrize("invalid", ["unselected", "wrong_value", "wrong_method", "not_mapping", "alias_conflict"])
+def test_invalid_per_image_options_fail_before_cache_or_processing(
+        tmp_path, options, monkeypatch, invalid):
+    file = make_image(tmp_path / "source.png")
+    alias = file.parent / "unused" / ".." / file.name
+    parameters = {
+        "unselected": {tmp_path / "other.png": options},
+        "wrong_value": {file: {"threshold": 100}},
+        "wrong_method": {file: Options(method="morphology")},
+        "not_mapping": [(file, options)],
+        "alias_conflict": {file: options, alias: replace(options, threshold=200)},
+    }[invalid]
+
+    def unexpected_processing(*_):
+        pytest.fail("invalid parameters must fail before processing")
+
+    monkeypatch.setattr(service, "process_single", unexpected_processing)
+    cache = tmp_path / "cache"
+    with pytest.raises(ValueError, match="逐图|texture|冲突"):
+        service.process_batch(service.scan_inputs([file]), options,
+                              cache_dir=cache, per_image_options=parameters)
+    assert not cache.exists()
+
+
+def test_cached_worker_default_uses_actual_per_image_strength(tmp_path, options, monkeypatch):
+    sources = service.scan_inputs([make_image(tmp_path / f"{index}.png") for index in range(2)])
+    actual = replace(options, texture_strength=0.012)
+    monkeypatch.setattr(service, "worker_limits", lambda: WorkerLimits(10, 4, 2, 16 * 1024 ** 3))
+    calls = []
+
+    def capture_parallel(inputs, opts, cache, workers, cancel, progress, processed, per_image_options=None):
+        calls.append((workers, per_image_options))
+        return service.BatchResult(opts)
+
+    monkeypatch.setattr(service, "_process_parallel", capture_parallel)
+    service.process_batch(sources, options, cache_dir=tmp_path / "cache",
+                          per_image_options={sources[0].path: actual})
+    assert calls == [(2, {sources[0].path: actual})]
+    # An empty override remains equivalent to the old zero-strength call.
+    batch = service.process_batch(sources, options, cache_dir=tmp_path / "cache", per_image_options={})
+    assert len(batch.items) == 2
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("operation", ["export", "replace"])
+@pytest.mark.parametrize("uniform", [False, True])
+def test_schema_two_report_records_actual_uniform_or_mixed_parameters(
+        tmp_path, options, operation, uniform):
+    files = [make_image(tmp_path / "source" / f"{index}.png") for index in range(2)]
+    originals = [file.read_bytes() for file in files]
+    low = replace(options, threshold=100, median_size=1)
+    high = low if uniform else replace(low, threshold=230)
+    batch = service.process_batch(service.scan_inputs(files), options,
+                                  cache_dir=tmp_path / "cache",
+                                  per_image_options=dict(zip(files, [low, high])))
+    save = service.export_batch if operation == "export" else service.replace_originals
+    summary = save(batch, tmp_path / "saved")
+    report = read_report(summary.report_path)
+    assert report["schema_version"] == 2
+    assert report["parameter_mode"] == ("uniform" if uniform else "per_image")
+    assert report["parameters"] == (low.to_dict() if uniform else None)
+    assert report["parameters_complete"] is True
+    assert report["batch_context_parameters"] == options.to_dict()
+    assert [entry["parameters"] for entry in report["images"]] == [low.to_dict(), high.to_dict()]
+    assert [entry["metrics"]["parameters"] for entry in report["images"]] == [low.to_dict(), high.to_dict()]
+    if operation == "replace":
+        service.restore_replacement(summary.report_path)
+    assert [file.read_bytes() for file in files] == originals
+
+
+def test_legacy_unknown_item_parameters_are_not_invented_from_batch_context(tmp_path, options):
+    _, batch = batch_for(tmp_path, options, count=1)
+    original = batch.items[0]
+    metrics = {key: value for key, value in original.metrics.items() if key != "parameters"}
+    result = replace(original.result, metrics=dict(metrics))
+    batch.items[0] = replace(original, result=result, metrics=metrics, options=None)
+    summary = service.export_batch(batch, tmp_path / "export")
+    report = read_report(summary.report_path)
+    assert report["parameter_mode"] == "per_image"
+    assert report["parameters"] is None and report["parameters_complete"] is False
+    assert report["images"][0]["parameters"] is None
+    assert report["batch_context_parameters"] == options.to_dict()
+
+
+@pytest.mark.parametrize("actual", [Options(method="morphology"), {"method": "texture"}])
+def test_save_rejects_invalid_actual_item_options_before_creating_output(tmp_path, options, actual):
+    _, batch = batch_for(tmp_path, options, count=1)
+    batch.items[0] = replace(batch.items[0], options=actual)
+    with pytest.raises(ValueError, match="texture|Options"):
+        service.export_batch(batch, tmp_path / "export")
+    assert not (tmp_path / "export").exists()
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_restore_accepts_old_and_new_report_versions_and_exact_bytes(tmp_path, options, version):
+    files, batch = batch_for(tmp_path, options)
+    originals = [file.read_bytes() for file in files]
+    summary = service.replace_originals(batch, tmp_path / "backup")
+    report = read_report(summary.report_path)
+    report["schema_version"] = version
+    if version == 1:
+        for key in ("parameter_mode", "parameters_complete", "batch_context_parameters"):
+            report.pop(key)
+        for entry in report["images"]:
+            entry.pop("parameters")
+    summary.report_path.write_text(json.dumps(report), encoding="utf-8")
+    restored = service.restore_replacement(summary.report_path)
+    assert restored.outputs == files
+    assert [file.read_bytes() for file in files] == originals
+    assert read_report(summary.report_path)["schema_version"] == version
+    service.restore_replacement(summary.report_path)
+    assert [file.read_bytes() for file in files] == originals
+
+
+@pytest.mark.parametrize("version", [True, False, None, "1", "2", 1.0, 2.0, 0, 3])
+def test_restore_rejects_noninteger_or_unknown_schema_without_writes(tmp_path, options, version):
+    files, batch = batch_for(tmp_path, options, count=1)
+    summary = service.replace_originals(batch, tmp_path / "backup")
+    report = read_report(summary.report_path)
+    report["schema_version"] = version
+    summary.report_path.write_text(json.dumps(report), encoding="utf-8")
+    replaced_bytes = files[0].read_bytes()
+    report_bytes = summary.report_path.read_bytes()
+    with pytest.raises(ValueError, match="受支持"):
+        service.restore_replacement(summary.report_path)
+    assert files[0].read_bytes() == replaced_bytes
+    assert summary.report_path.read_bytes() == report_bytes
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("problem", ["corrupt_backup", "external_edit", "escaping_path"])
+def test_restore_versions_keep_backup_and_source_preflight_checks(tmp_path, options, version, problem):
+    files, batch = batch_for(tmp_path, options)
+    summary = service.replace_originals(batch, tmp_path / "backup")
+    report = read_report(summary.report_path)
+    report["schema_version"] = version
+    if problem == "corrupt_backup":
+        (summary.output_dir / report["images"][1]["backup"]).write_bytes(b"corrupt")
+    elif problem == "external_edit":
+        files[1].write_bytes(files[1].read_bytes() + b"external edit")
+    else:
+        report["images"][1]["backup"] = "../outside.png"
+    summary.report_path.write_text(json.dumps(report), encoding="utf-8")
+    before = [file.read_bytes() for file in files]
+    with pytest.raises(ValueError, match="校验|修改|越过"):
+        service.restore_replacement(summary.report_path)
+    assert [file.read_bytes() for file in files] == before
+
+
+def test_cancelled_mixed_replacement_rolls_back_and_keeps_actual_parameters(tmp_path, options):
+    files = [make_image(tmp_path / "source" / f"{index}.png") for index in range(2)]
+    original_bytes = [file.read_bytes() for file in files]
+    actual = [replace(options, threshold=100), replace(options, threshold=230)]
+    batch = service.process_batch(service.scan_inputs(files), options,
+                                  per_image_options=dict(zip(files, actual)))
+    stopped = threading.Event()
+    summary = service.replace_originals(batch, tmp_path / "backup", cancel=stopped.is_set,
+                                        progress=lambda *_: stopped.set())
+    assert summary.cancelled and not summary.outputs
+    assert [file.read_bytes() for file in files] == original_bytes
+    report = read_report(summary.report_path)
+    assert report["schema_version"] == 2 and report["parameters"] is None
+    assert [entry["parameters"] for entry in report["images"]] == [opts.to_dict() for opts in actual]
+    assert all((summary.output_dir / entry["backup"]).read_bytes() == original
+               for entry, original in zip(report["images"], original_bytes))
+    service.restore_replacement(summary.report_path)
+    assert [file.read_bytes() for file in files] == original_bytes
+
+
+def test_parallel_cancel_before_any_commit_discards_all_late_results(tmp_path, options, monkeypatch):
+    sources = service.scan_inputs([make_image(tmp_path / f"{index}.png") for index in range(4)])
+    first_entered, stopped = threading.Event(), threading.Event()
+    started, published, progress = [], [], []
+    real_process = service.process_single
+
+    def cancel_with_two_running(source, opts):
+        started.append(source)
+        if source == sources[0]:
+            first_entered.set()
+            assert stopped.wait(3)
+        else:
+            assert first_entered.wait(3)
+            stopped.set()
+        return real_process(source, opts)
+
+    monkeypatch.setattr(service, "process_single", cancel_with_two_running)
+    batch = service.process_batch(
+        sources, options, cache_dir=tmp_path / "cache", max_workers=2,
+        cancel=stopped.is_set, processed=published.append,
+        progress=lambda *args: progress.append(args))
+    assert batch.cancelled and not batch.items and not batch.errors
+    assert not published and not progress
+    assert set(started) == set(sources[:2])
+    assert not list((tmp_path / "cache").rglob("mask.png"))

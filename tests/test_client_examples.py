@@ -76,3 +76,41 @@ def test_external_sampling_covers_glyph_directories(tmp_path):
 
     assert {item.character for item in examples} == {"A", "B", "C"}
     assert len(examples) == 3
+
+
+def test_default_cli_covers_all_curated_examples_with_desktop_options(tmp_path, monkeypatch):
+    from tools import prepare_client_examples as examples
+
+    workspace = tmp_path / 'workspace'
+    sources = []
+    grouped = workspace / 'output/字形图片高置信归并-测试/归类结果/按字'
+    for character, name, _ in examples.GROUPED_EXAMPLES:
+        sources.append(grouped / character / name)
+    for _, name, _ in examples.RUBBING_EXAMPLES:
+        sources.append(workspace / '10-1dbe' / name)
+    special = {
+        '55-9f82_crop_4.png', '高靈府院君申叔舟神道碑-55-9f82_crop_4.png',
+        '55-9f82_crop_124.png', '高靈府院君申叔舟神道碑-55-9f82_crop_124.png',
+    }
+    sources.extend(workspace / '字形图片/1' / name for name in sorted(special))
+    for source in sources:
+        source.parent.mkdir(parents=True, exist_ok=True)
+        rubbing(source)
+    original_bytes = {source: source.read_bytes() for source in sources}
+    # Extra fallback crops must not push the final curated cases out of the default slice.
+    rubbing(workspace / '10-1dbe/extra.png')
+    monkeypatch.setattr(examples, 'PROJECT_ROOT', workspace / 'hanzi-mask')
+    output = tmp_path / 'examples'
+
+    assert examples.main(['-o', str(output)]) == 0
+
+    report = json.loads((output / 'manifest.json').read_text())
+    assert report['count'] == 16
+    selected = {record['source'] for record in report['images']}
+    assert selected == {str(source) for source in sources}
+    assert special <= {record['source'].rsplit('/', 1)[-1] for record in report['images']}
+    assert report['parameters']['profile'] == 'balanced'
+    for name in ('keep_isolated', 'edge_refine', 'stroke_recovery', 'tip_recovery'):
+        assert report['parameters'][name] is True
+    for source, before in original_bytes.items():
+        assert source.read_bytes() == before

@@ -23,6 +23,7 @@ def panel():
     preview = PreviewPanel()
     preview.resize(900, 400)
     preview.show()
+    preview.activateWindow()
     app.processEvents()
     yield preview
     preview.close()
@@ -69,7 +70,8 @@ def test_same_pixels_and_colored_changes_are_independent_of_input(panel):
     panel.set_images(original, mask, candidate)
     assert panel.changes_canvas.image.pixelColor(1, 1).getRgb()[:3] == (208, 61, 61)
     assert panel.changes_canvas.image.pixelColor(2, 2).getRgb()[:3] == (44, 184, 208)
-    assert not panel.mask_canvas.smooth
+    assert panel.mask_canvas.smooth
+    assert set(np.unique(panel.mask_canvas._mask)) == {0, 255}
     original.paste((0, 0, 0), (0, 0, 5, 4))
     mask[:] = 0
     candidate[:] = 0
@@ -226,6 +228,31 @@ def test_delete_requests_cleanup_and_does_not_modify_pixels_itself(panel):
     assert len(requests) == 2
 
 
+@pytest.mark.parametrize('key', [Qt.Key_Delete, Qt.Key_Backspace])
+@pytest.mark.parametrize('inverted', [False, True])
+@pytest.mark.parametrize('multiselect', [False, True])
+def test_mouse_selection_gives_keyboard_focus_and_both_keys_clean_selected_components(
+        panel, key, inverted, multiselect):
+    mask = component_mask()
+    panel.set_images(Image.new('RGB', (80, 70), 'gray'), mask, mask)
+    panel.set_mask_inverted(inverted)
+    requests = []
+    panel.clear_requested.connect(lambda: requests.append(panel.remove_selected()))
+    select_pixel(panel, 35, 10)
+    if multiselect:
+        select_pixel(panel, 10, 10, Qt.ControlModifier)
+    assert QApplication.focusWidget() is panel.mask_canvas
+    assert panel.mask_canvas.hasFocus()
+    assert panel.selection_count == (32 if multiselect else 30)
+    QTest.keyClick(QApplication.focusWidget(), key)
+    assert len(requests) == 1
+    assert np.count_nonzero(requests[0]) == (0 if multiselect else 2)
+    np.testing.assert_array_equal(panel.mask_canvas._mask, mask)
+    panel.clear_selection()
+    QTest.keyClick(QApplication.focusWidget(), key)
+    assert len(requests) == 1
+
+
 def test_new_images_and_clear_drop_selection_but_invalid_input_preserves_it(panel):
     mask = component_mask()
     panel.set_images(Image.new("RGB", (80, 70), "gray"), mask, mask)
@@ -285,3 +312,40 @@ def test_mask_context_menu_changes_only_display_and_keeps_selected_component(pan
     assert panel.selection_count == 0
     assert canvas.inverted
     assert canvas.image.pixelColor(35, 10).red() == 0
+
+
+@pytest.mark.parametrize("inverted", [False, True])
+def test_interpolated_edges_do_not_change_native_pixels_or_selection_geometry(panel, inverted):
+    mask = component_mask()
+    original = mask.copy()
+    panel.resize(983, 487)
+    QApplication.instance().processEvents()
+    panel.set_images(Image.new("RGB", (80, 70), "gray"), mask, mask.copy())
+    panel.set_mask_inverted(inverted)
+    canvas = panel.mask_canvas
+    assert canvas.smooth
+    assert not panel.scale.is_integer()
+    # The component's outermost foreground and its immediate background stay
+    # distinct even when their rendered edge has intermediate gray values.
+    select_pixel(panel, 35, 10)
+    assert panel.selection_count == 30
+    result = panel.remove_selected()
+    assert result[10, 35] == 0
+    assert result[10, 10] == 255
+    select_pixel(panel, 34, 10)
+    assert panel.selection_count == 0
+    np.testing.assert_array_equal(canvas._mask, original)
+    np.testing.assert_array_equal(mask, original)
+    assert canvas.image.pixelColor(35, 10).red() == (0 if inverted else 255)
+    assert canvas.image.pixelColor(34, 10).red() == (255 if inverted else 0)
+    # Native QImage is binary while the fitted rendering smooths only display.
+    painted = canvas.grab().toImage()
+    native = {canvas.image.pixelColor(x, y).red()
+              for y in range(canvas.image.height()) for x in range(canvas.image.width())}
+    assert native == {0, 255}
+    left = pixel_position(canvas, 34, 10).x()
+    right = pixel_position(canvas, 36, 10).x()
+    top = pixel_position(canvas, 35, 9).y()
+    bottom = pixel_position(canvas, 35, 11).y()
+    assert any(0 < painted.pixelColor(x, y).red() < 255
+               for y in range(top, bottom + 1) for x in range(left, right + 1))

@@ -75,9 +75,20 @@ def discover_default(workspace: Path) -> list[Example]:
         path = rubbing / name
         if path.is_file():
             selected.append(Example(path, character, note))
-    painted = workspace / '字形图片' / '1' / '55-9f82_crop_4.png'
-    if painted.is_file():
-        selected.append(Example(painted, '眞', '红色字与中性石面，颜色前景检测'))
+    for name, note in (
+        ('55-9f82_crop_4.png', '红色字与中性石面，小尺寸尖细收笔'),
+        ('高靈府院君申叔舟神道碑-55-9f82_crop_4.png', '红色字与中性石面，原尺寸尖细收笔'),
+    ):
+        painted = workspace / '字形图片' / '1' / name
+        if painted.is_file():
+            selected.append(Example(painted, '眞', note))
+    for name, note in (
+        ('高靈府院君申叔舟神道碑-55-9f82_crop_124.png', '笔画明暗不均，原尺寸'),
+        ('55-9f82_crop_124.png', '笔画明暗不均，小尺寸'),
+    ):
+        path = workspace / '字形图片' / '1' / name
+        if path.is_file():
+            selected.append(Example(path, '朝', note))
     used = {item.source.resolve() for item in selected}
     if rubbing.is_dir():
         for path in sorted(rubbing.iterdir(), key=natural_key):
@@ -172,14 +183,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, help="外部图片目录；省略时寻找工作区本地拓片")
     parser.add_argument("-o", "--output", type=Path, default=PROJECT_ROOT / "output/client-examples",
                         help="新的输出目录，默认 output/client-examples")
-    parser.add_argument("--count", type=int, default=13, help="示例数量，默认 13")
+    parser.add_argument("--count", type=int, default=16, help="示例数量，默认 16")
     args = parser.parse_args(argv)
     if not 1 <= args.count <= 48:
         parser.error("示例数量必须在 1–48 之间")
     try:
         examples = (discover_external(args.source.expanduser().resolve(), args.count)
                     if args.source else discover_default(PROJECT_ROOT.parent)[:args.count])
-        manifest = prepare(examples, args.output, Options(method="texture"))
+        manifest = prepare(examples, args.output, Options(method="texture", keep_isolated=True,
+                                                        edge_refine=True, stroke_recovery=True,
+                                                        tip_recovery=True))
     except (OSError, ValueError, Image.DecompressionBombError) as error:
         parser.error(str(error))
     print(f"已准备 {manifest['count']} 张 texture 示例：{args.output.expanduser().resolve()}")

@@ -5,6 +5,7 @@ Export writes a fresh run directory; replacement is PNG-only and always creates
 a complete, durable backup first.
 """
 
+from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,6 +22,7 @@ import numpy as np
 from PIL import Image
 
 from . import __version__
+from .concurrency import MAX_WORKERS, worker_limits
 from .processing import Options, Result, load_image, process_image
 
 SUPPORTED = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
@@ -50,6 +52,7 @@ class ProcessedImage:
     mask_path: Path | None = None
     candidate_path: Path | None = None
     metrics: dict = field(default_factory=dict)
+    options: Options | None = None
 
 
 @dataclass(frozen=True)
@@ -214,44 +217,82 @@ def process_single(source: InputImage | Path | str, options: Options) -> Process
     result = process_image(source.path, options)
     if _digest(source.path) != before:
         raise ValueError(f"处理过程中原图发生变化，请重新处理：{source.path}")
-    return ProcessedImage(source, result, before, metrics=dict(result.metrics))
+    metrics = dict(result.metrics)
+    metrics["parameters"] = options.to_dict()
+    result.metrics = metrics
+    return ProcessedImage(source, result, before, metrics=dict(metrics), options=options)
+
+
+def _normalize_image_options(
+    sources: list[InputImage], parameters: Mapping[Path, Options] | None,
+) -> dict[Path, Options]:
+    if parameters is None:
+        return {}
+    if not isinstance(parameters, Mapping):
+        raise ValueError("逐图参数必须是原图路径与 Options 的映射")
+    selected = {source.path for source in sources}
+    normalized = {}
+    for path, options in parameters.items():
+        if not isinstance(options, Options):
+            raise ValueError("逐图参数的值必须是 Options")
+        _texture(options)
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except (TypeError, ValueError, OSError) as error:
+            raise ValueError("逐图参数的键必须是已选择的原图路径") from error
+        if resolved not in selected:
+            raise ValueError(f"逐图参数包含未选择的原图：{resolved}")
+        if resolved in normalized and normalized[resolved] != options:
+            raise ValueError(f"同一原图存在冲突的逐图参数：{resolved}")
+        normalized[resolved] = options
+    return normalized
 
 
 def process_batch(inputs: Iterable[InputImage], options: Options,
                   cancel: Cancel | None = None, progress: Progress | None = None,
                   cache_dir: Path | str | None = None,
                   processed: Callable[[ProcessedImage], None] | None = None,
-                  max_workers: int | None = None) -> BatchResult:
+                  max_workers: int | None = None,
+                  per_image_options: Mapping[Path, Options] | None = None) -> BatchResult:
     """Compute in the caller's worker; image errors do not stop a batch.
 
     cache_dir receives a fresh child directory on every call, so reprocessing
     with different parameters cannot overwrite an older result still in use.
-    Cached desktop batches use at most two image threads; expensive native
+    Cached desktop batches default to the hardware policy recommendation
+    (at most two image threads); expensive native
     sparse solves release the GIL. Only that many jobs are submitted at once.
     Results are cached inside each job, and callbacks run in this caller's
     thread. Cancellation waits for the current native solves to finish without
     publishing their late results. In-memory batches stay sequential by default.
-    An explicit max_workers (1 to 4) permits controlled comparisons.
+    An explicit max_workers (1 to MAX_WORKERS) permits controlled comparisons;
+    the desktop further limits selectable values using worker_limits().
+    per_image_options overrides only selected source paths. Each completed item
+    records its actual parameters; batch.options remains the default context.
     """
     _texture(options)
     sources = list(inputs)
+    image_options = _normalize_image_options(sources, per_image_options)
     batch = BatchResult(options)
     if max_workers is not None and (isinstance(max_workers, bool)
                                     or not isinstance(max_workers, int)
-                                    or not 1 <= max_workers <= 4):
-        raise ValueError("并行处理数量必须是 1–4 之间的整数")
+                                    or not 1 <= max_workers <= MAX_WORKERS):
+        raise ValueError(f"并行处理数量必须是 1–{MAX_WORKERS} 之间的整数")
     cache = Path(cache_dir).expanduser().resolve() if cache_dir is not None else None
     if cache is not None:
         if any(source.path.is_relative_to(cache) for source in sources):
             raise ValueError("缓存目录不能是原图所在目录或其上级目录")
         cache.mkdir(parents=True, exist_ok=True)
         cache = Path(tempfile.mkdtemp(prefix="batch-", dir=cache))
+    needs_texture_solve = any(
+        image_options.get(source.path, options).texture_strength != 0 for source in sources
+    )
     workers = max_workers if max_workers is not None else (
-        min(2, max(1, (os.cpu_count() or 1) // 2))
-        if cache is not None and options.texture_strength != 0 else 1)
+        worker_limits().recommended
+        if cache is not None and needs_texture_solve else 1)
     workers = min(workers, max(1, len(sources)))
     if workers > 1:
-        return _process_parallel(sources, options, cache, workers, cancel, progress, processed)
+        return _process_parallel(sources, options, cache, workers, cancel, progress, processed,
+                                 per_image_options=image_options)
     for index, source in enumerate(sources, 1):
         try:
             _cancel(cancel)
@@ -259,7 +300,7 @@ def process_batch(inputs: Iterable[InputImage], options: Options,
             batch.cancelled = True
             break
         try:
-            item = process_single(source, options)
+            item = process_single(source, image_options.get(source.path, options))
             _cancel(cancel)
             if cache is not None:
                 item = _cache_item(item, cache, index)
@@ -281,16 +322,18 @@ def process_batch(inputs: Iterable[InputImage], options: Options,
 def _process_parallel(sources: list[InputImage], options: Options,
                       cache: Path | None, workers: int,
                       cancel: Cancel | None, progress: Progress | None,
-                      processed: Callable[[ProcessedImage], None] | None) -> BatchResult:
+                      processed: Callable[[ProcessedImage], None] | None,
+                      per_image_options: Mapping[Path, Options] | None = None) -> BatchResult:
     batch = BatchResult(options)
     items, errors = {}, {}
     submitted = 0
     completed = 0
     pending = {}
+    image_options = per_image_options or {}
 
     def calculate(index, source):
         _cancel(cancel)
-        item = process_single(source, options)
+        item = process_single(source, image_options.get(source.path, options))
         _cancel(cancel)
         if cache is not None:
             item = _cache_item(item, cache, index + 1)
@@ -384,9 +427,11 @@ def _cache_item(item: ProcessedImage, cache: Path, index: int) -> ProcessedImage
     mask_path, candidate_path = directory / "mask.png", directory / "candidate.png"
     _atomic_write(mask_path, _mask_bytes(item), exclusive=True)
     _atomic_write(candidate_path, _png_bytes(item.result.candidate), exclusive=True)
-    _report(directory / "metrics.json", item.metrics)
+    metrics = dict(item.metrics or (item.result.metrics if item.result is not None else {}))
+    metrics["parameters"] = _item_parameters(item)
+    _report(directory / "metrics.json", metrics)
     return ProcessedImage(item.source, None, item.source_sha256,
-                          mask_path, candidate_path, dict(item.metrics))
+                          mask_path, candidate_path, metrics, options=item.options)
 
 
 def _atomic_write(path: Path, data: bytes, exclusive: bool = False) -> None:
@@ -418,13 +463,31 @@ def _new_directory(path: Path) -> Path:
     return directory
 
 
+def _item_parameters(item: ProcessedImage) -> dict | None:
+    if item.options is not None:
+        return item.options.to_dict()
+    # Legacy callers may have embedded a recorded snapshot. Never substitute
+    # the batch's current settings for an item's unknown processing settings.
+    parameters = item.metrics.get("parameters")
+    if not isinstance(parameters, dict) and item.result is not None:
+        parameters = item.result.metrics.get("parameters")
+    return dict(parameters) if isinstance(parameters, dict) else None
+
+
 def _base_report(batch: BatchResult, operation: str) -> dict:
+    parameters = [_item_parameters(item) for item in batch.items]
+    uniform = bool(parameters) and parameters[0] is not None and all(
+        value == parameters[0] for value in parameters[1:]
+    )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "tool_version": __version__,
         "operation": operation,
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "parameters": batch.options.to_dict(),
+        "parameter_mode": "uniform" if uniform else "per_image",
+        "parameters": parameters[0] if uniform else None,
+        "parameters_complete": all(value is not None for value in parameters),
+        "batch_context_parameters": batch.options.to_dict(),
         "needs_visual_review": True,
         "processing_cancelled": batch.cancelled,
         "processing_errors": [{"source": str(e.path), "error": e.error} for e in batch.errors],
@@ -436,6 +499,15 @@ def _validate_items(batch: BatchResult) -> None:
     _texture(batch.options)
     if not batch.items:
         raise ValueError("没有可保存的处理结果")
+    for item in batch.items:
+        if item.options is not None:
+            if not isinstance(item.options, Options):
+                raise ValueError("逐图处理结果的参数必须是 Options")
+            _texture(item.options)
+        else:
+            parameters = _item_parameters(item)
+            if parameters is not None and parameters.get("method") not in {None, "texture"}:
+                raise ValueError("桌面保存仅支持 texture 的逐图处理结果")
     sources = [item.source.path for item in batch.items]
     outputs = [item.source.relative_path.as_posix().casefold() for item in batch.items]
     if len(set(sources)) != len(sources) or len(set(outputs)) != len(outputs):
@@ -461,7 +533,8 @@ def export_batch(batch: BatchResult, output_dir: Path | str,
             _cancel(cancel)
             relative = Path("images") / item.source.relative_path
             record = {"source": str(item.source.path), "source_sha256": item.source_sha256,
-                      "output": relative.as_posix(), "metrics": item.metrics}
+                      "output": relative.as_posix(), "parameters": _item_parameters(item),
+                      "metrics": item.metrics}
             try:
                 data = _mask_bytes(item)
                 target = directory / relative
@@ -560,7 +633,8 @@ def replace_originals(batch: BatchResult, backup_dir: Path | str,
             report["images"].append({"source": str(item.source.path), "backup": relative.as_posix(),
                                       "source_sha256": item.source_sha256,
                                       "output_sha256": sha256(output).hexdigest(),
-                                      "status": "backed_up", "metrics": item.metrics})
+                                      "status": "backed_up", "parameters": _item_parameters(item),
+                                      "metrics": item.metrics})
         report["status"] = "replacing"
         _report(summary.report_path, report)
         for index, (item, entry) in enumerate(zip(batch.items, report["images"]), 1):
@@ -602,7 +676,9 @@ def restore_replacement(report_path: Path | str,
     """
     path = Path(report_path).expanduser().resolve()
     report = json.loads(path.read_text(encoding="utf-8"))
-    if report.get("operation") != "replace" or report.get("schema_version") != 1:
+    schema_version = report.get("schema_version")
+    if (report.get("operation") != "replace" or type(schema_version) is not int
+            or schema_version not in {1, 2}):
         raise ValueError("不是受支持的原位替换恢复清单")
     entries = report["images"]
     for entry in entries:

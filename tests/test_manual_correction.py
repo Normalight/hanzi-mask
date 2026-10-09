@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 import json
 
 import numpy as np
@@ -10,6 +11,7 @@ from hanzi_mask.batch_service import (
     replace_originals, restore_replacement, scan_inputs,
 )
 from hanzi_mask.manual_correction import apply_correction
+from hanzi_mask import manual_correction
 from hanzi_mask.processing import Options
 
 
@@ -39,6 +41,8 @@ def test_cached_revision_preserves_old_mask_candidate_and_source(sample, tmp_pat
     assert revision.result is None and revision.mask_path != item.mask_path
     assert revision.candidate_path == item.candidate_path
     assert revision.source_sha256 == item.source_sha256
+    assert revision.options == item.options == options
+    assert revision.metrics["parameters"] == options.to_dict()
     assert np.array_equal(corrected, copy)
     assert np.array_equal(load_mask(revision), corrected)
     assert item.mask_path.read_bytes() == old_mask_bytes
@@ -61,6 +65,7 @@ def test_memory_item_gets_cached_candidate_and_roundtrip_preview(sample, tmp_pat
     item = process_batch(scan_inputs([source]), options).items[0]
     revised = apply_correction(item, item.result.mask.copy(), tmp_path / "corrections")
     assert revised.result is None
+    assert revised.options == options
     assert revised.candidate_path.is_file()
     loaded = load_result(revised)
     assert np.array_equal(loaded.candidate, item.result.candidate)
@@ -103,6 +108,8 @@ def test_corrected_item_exports_replaces_and_restores_exact_original(sample, tmp
         assert set(np.unique(np.asarray(image))) == {0, 255}
         assert np.array_equal(np.asarray(image), mask)
     report = json.loads(exported.report_path.read_text())
+    assert report["schema_version"] == 2
+    assert report["parameters"] == report["images"][0]["parameters"] == options.to_dict()
     assert report["images"][0]["metrics"]["manual_correction"]
     replacement = replace_originals(batch, tmp_path / "backup")
     with Image.open(source) as image:
@@ -175,3 +182,80 @@ def test_correction_cache_cannot_be_source_ancestor(sample, tmp_path):
         apply_correction(item, load_mask(item), source.parent)
     assert source.read_bytes() == original_bytes
     assert list(source.parent.iterdir()) == [source]
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_correction_and_undo_keep_actual_options_under_changed_batch_context(sample, tmp_path, cached):
+    source, options = sample
+    actual = replace(options, edge_refine=True, stroke_recovery=True, tip_recovery=True)
+    original = process_batch(scan_inputs([source]), actual,
+                             cache_dir=tmp_path / "cache" if cached else None).items[0]
+    source_bytes = source.read_bytes()
+    mask = load_mask(original).copy()
+    mask[5:10, 40:45] = 0
+    first = apply_correction(original, mask, tmp_path / "corrections")
+    second_mask = load_mask(first).copy()
+    second_mask[35:37, 2:5] = 255
+    second = apply_correction(first, second_mask, tmp_path / "corrections")
+    changed_context = replace(actual, threshold=250, keep_isolated=False, tip_recovery=False)
+    for index, item in enumerate([original, first, second]):
+        assert item.options == actual
+        assert item.metrics["parameters"] == actual.to_dict()
+        if item.mask_path is not None:
+            cache_metrics = json.loads((item.mask_path.parent / "metrics.json").read_text())
+            assert cache_metrics["parameters"] == actual.to_dict()
+        # Undo chooses an older immutable item, including its actual parameters.
+        summary = export_batch(BatchResult(changed_context, [item]), tmp_path / f"export-{index}")
+        report = json.loads(summary.report_path.read_text())
+        assert report["parameter_mode"] == "uniform"
+        assert report["parameters"] == report["images"][0]["parameters"] == actual.to_dict()
+        assert report["batch_context_parameters"] == changed_context.to_dict()
+        with Image.open(summary.outputs[0]) as image:
+            assert np.array_equal(np.asarray(image), load_mask(item))
+    assert not np.array_equal(load_mask(original), load_mask(first))
+    assert not np.array_equal(load_mask(first), load_mask(second))
+    assert source.read_bytes() == source_bytes
+
+
+def test_cached_dark_foreground_correction_uses_actual_foreground_without_solver(tmp_path, monkeypatch):
+    source = tmp_path / "dark.png"
+    rgba = np.zeros((30, 30, 4), dtype=np.uint8)
+    rgba[8:22, 12:18, 3] = 255
+    Image.fromarray(rgba).save(source)
+    options = Options(foreground="dark", texture_strength=0, threshold=127,
+                      median_size=1, stroke_radius=0, min_area=0, keep_isolated=True)
+    item = process_batch(scan_inputs([source]), options, cache_dir=tmp_path / "cache").items[0]
+    calls = []
+    actual_load = manual_correction.load_result
+
+    def observe_load(record, foreground="light"):
+        calls.append(foreground)
+        return actual_load(record, foreground)
+
+    def unexpected_solver(*_):
+        pytest.fail("manual correction must not run texture processing")
+
+    monkeypatch.setattr(manual_correction, "load_result", observe_load)
+    monkeypatch.setattr("hanzi_mask.batch_service.process_image", unexpected_solver)
+    revision = apply_correction(item, load_mask(item), tmp_path / "corrections")
+    assert calls == ["dark"]
+    assert revision.options == options
+    loaded = load_result(revision, revision.options.foreground)
+    assert np.all(np.asarray(loaded.original)[0, 0] == 255)
+    assert np.all(np.asarray(loaded.original)[15, 15] == 0)
+    assert np.array_equal(loaded.mask, load_mask(item))
+
+
+def test_unknown_legacy_options_remain_unknown_after_manual_correction(sample, tmp_path):
+    source, options = sample
+    original = process_batch(scan_inputs([source]), options).items[0]
+    metrics = {key: value for key, value in original.metrics.items() if key != "parameters"}
+    legacy = replace(original, options=None, metrics=metrics,
+                     result=replace(original.result, metrics=dict(metrics)))
+    revision = apply_correction(legacy, load_mask(legacy), tmp_path / "corrections")
+    assert revision.options is None
+    assert "parameters" not in revision.metrics
+    summary = export_batch(BatchResult(options, [revision]), tmp_path / "export")
+    report = json.loads(summary.report_path.read_text())
+    assert report["parameters"] is None and report["parameters_complete"] is False
+    assert report["images"][0]["parameters"] is None
