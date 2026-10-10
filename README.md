@@ -168,7 +168,25 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 同色、同宽且与笔画粘连的斑点，缺少可以由当前几何规则区分的信息。对于需要大批量精确分离真实字形的任务，应先建立人工校对的像素级标注，再训练专门的笔画/背景分割模型，并用独立标注集评估笔画保留率和斑点误留情况。本项目的候选掩膜可作为人工标注的起点，不应直接当作真实标签。
 
-## 开发
+## 桌面构建 CI
+
+[Build desktop apps](https://github.com/Normalight/hanzi-mask/actions/workflows/build.yml) 仅支持手动 `workflow_dispatch`，可选择两个平台或单个平台；提交、PR、标签和 Release 不自动启动。使用 Python 3.11，在 Windows x64（`windows-2022`）和 macOS arm64（`macos-15`）执行依赖及 wheel 校验、测试、Cython 保护、PyInstaller 打包和独立目录下的成品启动检查。运行器架构见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
+
+版本读取 `pyproject.toml`。成品为 `字形换底-v<版本>-windows-x64.zip`（解压后运行 `hanzi-mask/hanzi-mask.exe`）和 `字形换底-v<版本>-macos-arm64.zip`（内含 `字形换底.app`），附 SHA-256 校验文件，Actions 保留 14 天。Mac 使用 ad hoc 签名，未进行 Developer ID 签名或公证。认证与更新启动调用仍保持注释；工作流仅上传构建产物，没有发布步骤或发布密钥依赖。
+
+构建依赖位于 `packaging/requirements-build.txt`，Mac/Windows 文件引用它。独立克隆本仓库即可构建，不读取相邻源码或本地测试图片；不打包训练模型。打包后的默认备份/导出目录为用户文稿目录下的 `字形换底/`，文稿目录不可用时退回用户主目录；源码运行沿用项目 `output/字形换底/`。
+
+只检查配置（不构建）：
+
+```sh
+.venv/bin/python packaging/build_desktop.py --check --target macos-arm64
+```
+
+实际构建需在目标平台安装 `packaging/requirements-mac.txt` 或 `packaging/requirements-windows.txt`，并具备 Xcode Command Line Tools 或 MSVC C++ Build Tools，再执行 `python packaging/build_desktop.py --target <平台>`。构建脚本完成打包、成品检查和压缩；源码测试由 CI 单独执行。
+
+`packaging/protection.py` 是 `hanzi-auth/tools/desktop_packaging/protection.py` 的原样副本，源摘要为 `5045e63416373304b40b7f74e3e69876e952a539e4e87abdac201e8bc0e733a3`。公共保护逻辑在源头维护；本项目尚未加入共享同步清单，更新时显式复制并验证，不能独立改此副本。其余打包入口和启动检查为本产品维护。
+
+## 开发测试
 
 ```sh
 .venv/bin/python -m pip install -r requirements-dev.txt

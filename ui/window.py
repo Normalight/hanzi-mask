@@ -22,6 +22,7 @@ from hanzi_mask.concurrency import worker_limits
 from hanzi_mask.processing import Options, Result
 from hanzi_mask.texture import TEXTURE_PROFILES
 from .canvas import PreviewPanel
+from .paths import default_output
 from .review_hints import review_hints
 from .task_worker import PreviewWorker, TaskWorker
 
@@ -205,7 +206,7 @@ class MainWindow(QMainWindow):
         output_row = QWidget()
         line = QHBoxLayout(output_row)
         line.setContentsMargins(0, 0, 0, 0)
-        self.output = QLineEdit(str(PROJECT_ROOT / 'output' / APP_NAME))
+        self.output = QLineEdit(str(default_output(PROJECT_ROOT, APP_NAME)))
         self.output.setMinimumWidth(80)
         choose_output = QPushButton('…')
         choose_output.setMaximumWidth(32)

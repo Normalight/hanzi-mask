@@ -65,3 +65,11 @@ python app.py ../10-1dbe -o output/10-1dbe --preview
 修改算法后检查代表性拓片对照图，并如实区分合成图测试、真实图片批处理和人工视觉验收。测试图片不得作为已验证语义正确的标注。提交说明遵循工作区根 `AGENTS.md`。
 
 使用生成式修复掩膜时，保留原始生成图、逐次提示词、最终选择和哈希记录，逐图检查与原图的位置及结构对应关系。尺寸相同不代表标签对齐；修复推断属于伪标签，不能声明为专家真值。按完整画布恢复原尺寸后生成 0/255 训练标签，另存高分辨率结果；测试图不参与生成。流程与配对训练对照见 `docs/IMAGEGEN_MASKS.md`。
+
+## CI 与打包
+
+`.github/workflows/build.yml` 仅 `workflow_dispatch` 手动触发，可选全部或单一平台；不得在仅配置 CI 的任务中触发构建。Python 3.11，Windows x64 使用 `windows-2022`，macOS arm64 使用 `macos-15`。流程依次校验依赖/原生架构/vendored wheel 摘要、运行测试、Cython 保护、PyInstaller 打包、独立临时目录的成品检查并上传 ZIP 与 SHA-256。版本取 `pyproject.toml`，产物保留 14 天；无发布任务或发布凭据要求。Mac 仅 ad hoc 签名，Developer ID 与公证需后续单独配置。
+
+依赖统一在 `packaging/requirements-build.txt`，平台 requirements 引用它。`packaging/build_desktop.py --check --target macos-arm64` 仅检查，无编译；`--target` 不带 `--check` 才实际构建。保护后的业务入口包含 `ui/window.py`；成品的 `--smoke-test` 检查本地窗口、图片编解码和 texture 求解，不启用认证或更新。不需要训练模型、邻仓源码、GitCode 或更新 SDK 原生发行资源。
+
+`packaging/protection.py` 原样复制自 `hanzi-auth/tools/desktop_packaging/protection.py`，摘要 `5045e63416373304b40b7f74e3e69876e952a539e4e87abdac201e8bc0e733a3`。公共逻辑只在源头改，本项目尚未加入共享同步脚本，需显式复制并核验。其他新增打包脚本为本产品维护。源码默认输出仍在项目 `output/字形换底/`；冻结运行默认在用户文稿 `字形换底/`（缺文稿路径退回主目录），由 `ui/paths.py` 决定，不写应用资源目录。
