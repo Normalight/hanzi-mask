@@ -69,13 +69,13 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 默认抽取最多 16 张工作区中的多种字形、尺寸和纹理，包含可用红字的原尺寸和小尺寸尖细收笔案例，以及“朝”的原尺寸和小尺寸两张明暗不均案例，原图只复制。示例位于 `output/client-examples/`，点击“加载示例”即可导入；`expected/` 是同参数的候选输出，`preview-*.jpg` 是对照图，不代表人工真值。输出目录已存在时使用 `-o output/examples-new` 保留旧示例。其他机器可通过 `--source /path/to/images --count 12` 指定自己的图片。
 
-## 平台接入预留
+## 平台接入
 
-`ui/platform_integration.py` 预留共享认证、窗口保护和原生更新接入，按需导入共享包；独立产品标识为 `hanzi-mask`。`ui/window.py` 的桌面启动函数内，`start_platform_session` 和 `attach_platform_services` 两段调用保持注释。本地启动不登录、不检查更新，也不修改平台账号或授权。
+`ui/platform_integration.py` 提供共享认证、窗口保护和原生更新接入，按需导入共享包；独立产品标识为 `hanzi-mask`。`ui/window.py` 的桌面启动函数依次调用 `start_platform_session` 与 `attach_platform_services`：GUI 启动先完成共享登录（取消登录即退出，不进入本地窗口），登录成功后挂接授权守卫与原生更新。命令行入口保持本地行为，不加载共享模块。
 
-启用前，需在共享包、服务端和授权管理中登记 `hanzi-mask`，并配置对应安装包、更新 feed 和原生构建资源；产品标识不能复用其他软件的 ID。平台依赖使用 `vendor/hanzi_auth-0.2.7-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.6-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
+`hanzi-mask` 已在 `hanzi-update` 的 products.json 注册表与服务端登记，更新前置检查依赖平台发布对应的安装包与更新 feed；发布 feed 就绪前检查结果为待发布状态，不影响本地使用。平台依赖使用 `vendor/hanzi_auth-0.2.10-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
 
-预留的锁定救援保存将已采用的缓存结果固定导出为副本。锁定时协作取消计算并等待任务结束，保留结果缓存和人工清理的撤销记录；更新时，有采用结果则先在后台导出，成功完成并核对保存范围后才继续退出。原生更新准备期间的试探关闭保留缓存，实际关闭仍等待后台任务完成。
+锁定救援保存将已采用的缓存结果固定导出为副本。锁定时协作取消计算并等待任务结束，保留结果缓存和人工清理的撤销记录；更新时，有采用结果则先在后台导出，成功完成并核对保存范围后才继续退出。原生更新准备期间的试探关闭保留缓存，实际关闭仍等待后台任务完成。
 
 共享依赖由 `hanzi-auth/tools/sync_desktop.py` 维护，目前同步目标为字符检测和字形归并两个仓库。更新本项目 wheel 时需同步核对依赖引用与包版本；将本项目加入自动同步前，需明确 wheel 和打包脚本各自的目的地。当前沿用已分发的 wheel，不自动重建共享源码。
 
@@ -174,7 +174,7 @@ Windows 压缩使用 Python `shutil.make_archive`，按需启用 Zip64。Mac 使
 
 [Build desktop apps](https://github.com/Normalight/hanzi-mask/actions/workflows/build.yml) 仅支持手动 `workflow_dispatch`，可选择两个平台或单个平台；提交、PR、标签和 Release 不自动启动。使用 Python 3.11，在 Windows x64（`windows-2022`）和 macOS arm64（`macos-15`）执行依赖及 wheel 校验、测试、Cython 保护、PyInstaller 打包和独立目录下的成品启动检查。运行器架构见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
 
-版本读取 `pyproject.toml`。成品为 `字形换底-v<版本>-windows-x64.zip`（解压后运行 `hanzi-mask/hanzi-mask.exe`）和 `字形换底-v<版本>-macos-arm64.zip`（内含 `字形换底.app`），附 SHA-256 校验文件，Actions 保留 14 天。Mac 使用 ad hoc 签名，未进行 Developer ID 签名或公证。认证与更新启动调用仍保持注释；工作流仅上传构建产物，没有发布步骤或发布密钥依赖。
+版本读取 `pyproject.toml`。成品为 `字形换底-v<版本>-windows-x64.zip`（解压后运行 `hanzi-mask/hanzi-mask.exe`）和 `字形换底-v<版本>-macos-arm64.zip`（内含 `字形换底.app`），附 SHA-256 校验文件，Actions 保留 14 天。Mac 使用 ad hoc 签名，未进行 Developer ID 签名或公证。桌面启动已接入共享登录与更新，成品冒烟检查仍只验证本地功能；工作流仅上传构建产物，没有发布步骤或发布密钥依赖。
 
 构建依赖位于 `packaging/requirements-build.txt`，Mac/Windows 文件引用它。独立克隆本仓库即可构建，不读取相邻源码或本地测试图片；不打包训练模型。打包后的默认备份/导出目录为用户文稿目录下的 `字形换底/`，文稿目录不可用时退回用户主目录；源码运行沿用项目 `output/字形换底/`。
 

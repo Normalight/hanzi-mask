@@ -11,13 +11,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_WHEELS = {
-    "hanzi_update-0.1.6-py3-none-any.whl": (
-        "hanzi-update", "0.1.6",
-        "1589e59f37ccd155fd5ec1bf51f33477421cc61f49ba451dd692f987abdf6a44",
+    "hanzi_update-0.1.8-py3-none-any.whl": (
+        "hanzi-update", "0.1.8",
+        "675e6071ec25f25074b46f438d611bdc58d90085242b089e535bf8f29f4b61e9",
     ),
-    "hanzi_auth-0.2.7-py3-none-any.whl": (
-        "hanzi-auth", "0.2.7",
-        "997b3dae0f080290e004e3731f561a813035b4e4e784b90b8dceab60d6950798",
+    "hanzi_auth-0.2.10-py3-none-any.whl": (
+        "hanzi-auth", "0.2.10",
+        "a72cfcf47d27b11f79e024454596e6008290485ae102376991c4419ddff1b1a6",
     ),
 }
 
@@ -44,7 +44,7 @@ def test_distributed_wheel_hash_size_and_metadata_match_manifest(filename):
     if name == "hanzi-auth":
         update, = [Requirement(value) for value in metadata.get_all("Requires-Dist", [])
                    if Requirement(value).name == "hanzi-update"]
-        assert update.marker is None and update.specifier.contains("0.1.6")
+        assert update.marker is None and update.specifier.contains("0.1.8")
 
 
 def test_vendoring_inventory_and_explicit_sync_boundary_are_documented():
@@ -62,8 +62,8 @@ def test_vendoring_inventory_and_explicit_sync_boundary_are_documented():
 def test_requirements_install_local_update_before_authentication():
     requirements = [line.strip() for line in (ROOT / "requirements.txt").read_text().splitlines()
                     if line.strip() and not line.lstrip().startswith("#")]
-    update = "./vendor/hanzi_update-0.1.6-py3-none-any.whl"
-    auth = "./vendor/hanzi_auth-0.2.7-py3-none-any.whl"
+    update = "./vendor/hanzi_update-0.1.8-py3-none-any.whl"
+    auth = "./vendor/hanzi_auth-0.2.10-py3-none-any.whl"
     assert requirements.count(update) == requirements.count(auth) == 1
     assert requirements.index(update) < requirements.index(auth)
     assert {line for line in requirements if line.endswith(".whl")} == {update, auth}
@@ -73,7 +73,7 @@ def test_requirements_install_local_update_before_authentication():
 def test_platform_extra_is_precisely_pinned_and_core_dependencies_remain_independent():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert set(project["optional-dependencies"]["platform"]) == {
-        "hanzi-auth==0.2.7", "hanzi-update==0.1.6",
+        "hanzi-auth==0.2.10", "hanzi-update==0.1.8",
     }
     base = [Requirement(value) for value in project["dependencies"]]
     assert {requirement.name for requirement in base} == {

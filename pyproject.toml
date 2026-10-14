@@ -17,8 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 platform = [
-  "hanzi-update==0.1.6",
-  "hanzi-auth==0.2.7",
+  "hanzi-update==0.1.8",
+  "hanzi-auth==0.2.10",
 ]
 
 [project.scripts]

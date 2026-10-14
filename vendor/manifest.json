@@ -1,27 +1,30 @@
 {
   "schema_version": 1,
-  "purpose": "预留桌面认证与更新依赖。安装依赖不启用登录、授权守卫或更新控制器；启用由客户端调用入口控制。",
+  "purpose": "桌面登录与更新依赖。GUI 启动启用共享登录会话、授权守卫与原生更新接入；命令行入口保持本地行为，不加载共享模块。",
   "source": "group-by-character/vendor 已分发 wheel",
   "synchronization": {
     "tool": "../hanzi-auth/tools/sync_desktop.py",
-    "current_targets": ["group-by-character", "char-detection-main"],
+    "current_targets": [
+      "group-by-character",
+      "char-detection-main"
+    ],
     "includes_hanzi_mask": false,
     "maintenance": "现有同步工具仅覆盖上述两个客户端。此项目目前显式维护依赖副本；未来应有意识地扩展同步清单、核对版本和摘要并验证受影响客户端。"
   },
   "wheels": [
     {
       "distribution": "hanzi-update",
-      "version": "0.1.6",
-      "filename": "hanzi_update-0.1.6-py3-none-any.whl",
-      "size": 21335,
-      "sha256": "1589e59f37ccd155fd5ec1bf51f33477421cc61f49ba451dd692f987abdf6a44"
+      "version": "0.1.8",
+      "filename": "hanzi_update-0.1.8-py3-none-any.whl",
+      "size": 22326,
+      "sha256": "675e6071ec25f25074b46f438d611bdc58d90085242b089e535bf8f29f4b61e9"
     },
     {
       "distribution": "hanzi-auth",
-      "version": "0.2.7",
-      "filename": "hanzi_auth-0.2.7-py3-none-any.whl",
-      "size": 127376,
-      "sha256": "997b3dae0f080290e004e3731f561a813035b4e4e784b90b8dceab60d6950798"
+      "version": "0.2.10",
+      "filename": "hanzi_auth-0.2.10-py3-none-any.whl",
+      "size": 130421,
+      "sha256": "a72cfcf47d27b11f79e024454596e6008290485ae102376991c4419ddff1b1a6"
     }
   ]
 }

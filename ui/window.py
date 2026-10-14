@@ -1288,12 +1288,11 @@ def main(argv=None):
     app.setApplicationName(APP_NAME)
     app.setOrganizationName('HanZi')
     app.setStyle('Fusion')
-    # 完成 hanzi-mask 的共享包与平台产品登记后，成组取消以下启动注释。
-    # from .platform_integration import start_platform_session, attach_platform_services
-    # session = start_platform_session(app)
-    # if session is None:
-    #     return 0
+    from .platform_integration import start_platform_session, attach_platform_services
+    session = start_platform_session(app)
+    if session is None:
+        return 0
     window = MainWindow(initial_paths=paths)
-    # attach_platform_services(window, session)
+    attach_platform_services(window, session)
     window.show()
     return app.exec()

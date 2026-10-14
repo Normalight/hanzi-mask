@@ -513,48 +513,52 @@ def test_busy_automatic_task_is_not_interrupted_when_update_is_refused(bridge):
 
 
 @pytest.mark.parametrize('entry', ['window', 'app-gui', 'app-cli'])
-def test_default_entry_points_do_not_import_or_activate_shared_sdks(tmp_path, entry):
+def test_entry_points_activate_platform_session_as_configured(tmp_path, entry):
     source = write_rubbing(tmp_path / 'input.png')
     script = """
 import importlib.abc
 import sys
+import types
 
-class BlockSharedSDK(importlib.abc.MetaPathFinder):
+class BlockRealSharedSDK(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split('.')[0] in {'hanzi_auth', 'hanzi_update'}:
-            raise AssertionError('默认入口不应加载共享SDK: ' + fullname)
+            raise AssertionError('不应加载真实共享SDK: ' + fullname)
 
-sys.meta_path.insert(0, BlockSharedSDK())
+sys.meta_path.insert(0, BlockRealSharedSDK())
+calls = []
+
+def fake_start_session(app, product):
+    calls.append(product)
+    return None
+
 entry, source, output = sys.argv[1:]
+if entry != 'app-cli':
+    stub = types.ModuleType('hanzi_auth')
+    stub.start_session = fake_start_session
+    sys.modules['hanzi_auth'] = stub
 if entry == 'app-cli':
     import app
     code = app.main([source, '-o', output])
     assert 'PySide6' not in sys.modules
+    assert not calls
 else:
-    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
     application = QApplication([])
-    closed = []
-    def close_window():
-        for widget in application.topLevelWidgets():
-            if widget.__class__.__name__ == 'MainWindow':
-                closed.append(widget.close())
-        if not closed:
-            application.quit()
-    QTimer.singleShot(0, close_window)
     if entry == 'window':
         from ui.window import main
         code = main([])
     else:
         import app
         code = app.main(['--gui'])
-    assert closed == [True]
+    assert calls == ['hanzi-mask']
+    assert not [w for w in application.topLevelWidgets() if w.__class__.__name__ == 'MainWindow']
 assert code == 0
-assert not any(name.split('.')[0] in {'hanzi_auth', 'hanzi_update'} for name in sys.modules)
+assert not any(name.split('.')[0] == 'hanzi_update' for name in sys.modules)
 """
     project = Path(__file__).resolve().parents[1]
     result = subprocess.run([sys.executable, '-c', script, entry, str(source), str(tmp_path / 'output')],
-                            cwd=project, capture_output=True, text=True, timeout=20)
+                            cwd=project, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
