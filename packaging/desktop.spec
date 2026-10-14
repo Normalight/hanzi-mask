@@ -39,7 +39,7 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='hanzi-mask',
           # Follow the build interpreter's native architecture; Intel runners
           # must not cross-assemble an arm64 binary.
           target_arch=None,
-          version=native_release['exe_version'](root),
+          version=native_release['exe_version'](root) if sys.platform == 'win32' else None,
           codesign_identity=None)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='hanzi-mask')
 if sys.platform == 'darwin':
