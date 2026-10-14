@@ -2,9 +2,9 @@
 
 本项目是独立 Git 仓库，桌面显示名为“字形换底”，提供拓片单字的字形掩膜提取、桌面复核、黑底白字 PNG 导出和备份替换。仓库与分发包名为 `hanzi-mask`，Python 包为 `hanzi_mask`，独立产品标识为 `hanzi-mask`。`python app.py` 默认打开 PySide6 客户端；带参数保留命令行行为，`python -m hanzi_mask` 始终为 CLI。桌面代码位于 `ui/`，业务代码位于 `hanzi_mask/`。运行环境为 Python 3.11+；不依赖相邻项目源码或模型。GUI 启动接入共享登录、授权守卫与原生更新；命令行入口保持本地行为，不加载共享模块。安装后的桌面入口为 `hanzi-mask-desktop`，命令行入口为 `hanzi-mask`。
 
-`requirements.txt` 引用本仓库 `vendor/hanzi_auth-0.2.10-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`；`pyproject.toml` 将共享包归入可选 `platform` extra，核心安装不要求平台依赖。使用平台 extra 前先安装本地 requirements，不引用相邻源码。共享包采用已分发 wheel；`hanzi-auth/tools/sync_desktop.py` 当前只覆盖 `group-by-character` 和 `char-detection-main`。将本项目纳入同步前需明确 wheel 与打包脚本目的地，升级时核对包版本和依赖引用，不自动重建存在未提交修改的共享源码。
+`requirements.txt` 引用本仓库 `vendor/hanzi_auth-0.2.11-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`；`pyproject.toml` 将共享包归入可选 `platform` extra，核心安装不要求平台依赖。使用平台 extra 前先安装本地 requirements，不引用相邻源码。共享包采用已分发 wheel；`hanzi-auth/tools/sync_desktop.py` 当前只覆盖 `group-by-character` 和 `char-detection-main`。将本项目纳入同步前需明确 wheel 与打包脚本目的地，升级时核对包版本和依赖引用，不自动重建存在未提交修改的共享源码。
 
-`ui/platform_integration.py` 提供延迟导入的平台适配，独立产品标识 `PRODUCT = "hanzi-mask"`。`ui/window.py` 的 `main()` 依次调用 `start_platform_session`（取消登录直接退出）与 `attach_platform_services`（授权守卫与原生更新接入）。产品已在 `hanzi-update` 的 products.json 注册表登记（hanzi-auth 0.2.10 / hanzi-update 0.1.8 起），服务端与授权管理从注册表识别 `hanzi-mask`；原生更新依赖平台发布安装包与更新 feed，feed 就绪前更新检查返回待发布，不阻塞本地功能。适配层不修改平台账号与授权。
+`ui/platform_integration.py` 提供延迟导入的平台适配，独立产品标识 `PRODUCT = "hanzi-mask"`。`ui/window.py` 的 `main()` 依次调用 `start_platform_session`（取消登录直接退出）与 `attach_platform_services`（授权守卫与原生更新接入）。产品已在 `hanzi-update` 的 products.json 注册表登记（hanzi-auth 0.2.11 / hanzi-update 0.1.8 起），服务端与授权管理从注册表识别 `hanzi-mask`；原生更新依赖平台发布安装包与更新 feed，feed 就绪前更新检查返回待发布，不阻塞本地功能。适配层不修改平台账号与授权。
 
 平台锁定救援保存将已采用的缓存结果固定导出为副本，不能沿用普通保存控件的原位替换模式。锁定时协作取消计算并等待任务结束，保留结果缓存与 Undo；更新时，有采用结果则先后台导出，仅本次导出成功且采用范围仍一致时允许继续退出。原生更新 `preparing` 阶段的试探关闭不得清理缓存与 Undo，实际退出继续遵守任务结束后清理的生命周期。修改启动接入时覆盖 GUI 启动接线（登录取消不创建窗口）、命令行不加载共享模块、锁定取消与救援导出、更新准备关闭等回归；本地接入不等于平台或原生更新已验收。
 

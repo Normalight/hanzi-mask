@@ -73,7 +73,7 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 `ui/platform_integration.py` 提供共享认证、窗口保护和原生更新接入，按需导入共享包；独立产品标识为 `hanzi-mask`。`ui/window.py` 的桌面启动函数依次调用 `start_platform_session` 与 `attach_platform_services`：GUI 启动先完成共享登录（取消登录即退出，不进入本地窗口），登录成功后挂接授权守卫与原生更新。命令行入口保持本地行为，不加载共享模块。
 
-`hanzi-mask` 已在 `hanzi-update` 的 products.json 注册表与服务端登记，更新前置检查依赖平台发布对应的安装包与更新 feed；发布 feed 就绪前检查结果为待发布状态，不影响本地使用。平台依赖使用 `vendor/hanzi_auth-0.2.10-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
+`hanzi-mask` 已在 `hanzi-update` 的 products.json 注册表与服务端登记，更新前置检查依赖平台发布对应的安装包与更新 feed；发布 feed 就绪前检查结果为待发布状态，不影响本地使用。平台依赖使用 `vendor/hanzi_auth-0.2.11-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
 
 锁定救援保存将已采用的缓存结果固定导出为副本。锁定时协作取消计算并等待任务结束，保留结果缓存和人工清理的撤销记录；更新时，有采用结果则先在后台导出，成功完成并核对保存范围后才继续退出。原生更新准备期间的试探关闭保留缓存，实际关闭仍等待后台任务完成。
 

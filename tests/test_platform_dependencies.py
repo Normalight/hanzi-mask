@@ -15,9 +15,9 @@ EXPECTED_WHEELS = {
         "hanzi-update", "0.1.8",
         "675e6071ec25f25074b46f438d611bdc58d90085242b089e535bf8f29f4b61e9",
     ),
-    "hanzi_auth-0.2.10-py3-none-any.whl": (
-        "hanzi-auth", "0.2.10",
-        "a72cfcf47d27b11f79e024454596e6008290485ae102376991c4419ddff1b1a6",
+    "hanzi_auth-0.2.11-py3-none-any.whl": (
+        "hanzi-auth", "0.2.11",
+        "43bce5ff08e89eba116eb39e6bde52d619f61e63ca40066413e8a53bd05f840c",
     ),
 }
 
@@ -63,7 +63,7 @@ def test_requirements_install_local_update_before_authentication():
     requirements = [line.strip() for line in (ROOT / "requirements.txt").read_text().splitlines()
                     if line.strip() and not line.lstrip().startswith("#")]
     update = "./vendor/hanzi_update-0.1.8-py3-none-any.whl"
-    auth = "./vendor/hanzi_auth-0.2.10-py3-none-any.whl"
+    auth = "./vendor/hanzi_auth-0.2.11-py3-none-any.whl"
     assert requirements.count(update) == requirements.count(auth) == 1
     assert requirements.index(update) < requirements.index(auth)
     assert {line for line in requirements if line.endswith(".whl")} == {update, auth}
@@ -73,7 +73,7 @@ def test_requirements_install_local_update_before_authentication():
 def test_platform_extra_is_precisely_pinned_and_core_dependencies_remain_independent():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert set(project["optional-dependencies"]["platform"]) == {
-        "hanzi-auth==0.2.10", "hanzi-update==0.1.8",
+        "hanzi-auth==0.2.11", "hanzi-update==0.1.8",
     }
     base = [Requirement(value) for value in project["dependencies"]]
     assert {requirement.name for requirement in base} == {
