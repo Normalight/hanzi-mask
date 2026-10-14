@@ -9,5 +9,5 @@ pyinstaller-hooks-contrib==2026.6
 Cython==3.1.2
 setuptools==80.9.0
 pytest==9.1.1
-./vendor/hanzi_update-0.1.6-py3-none-any.whl
-./vendor/hanzi_auth-0.2.7-py3-none-any.whl
+./vendor/hanzi_update-0.1.8-py3-none-any.whl
+./vendor/hanzi_auth-0.2.10-py3-none-any.whl
