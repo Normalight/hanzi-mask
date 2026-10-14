@@ -1,4 +1,5 @@
 """Run inside the bundle, from a directory without source or user images."""
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -16,9 +17,9 @@ def smoke_test():
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
+    window.show()
+    app.processEvents()
     try:
-        window.show()
-        app.processEvents()
         if not window.isVisible():
             raise RuntimeError('桌面窗口未打开')
         if any(name.split('.')[0] in {'hanzi_auth', 'hanzi_update', 'torch'}
@@ -47,6 +48,13 @@ def smoke_test():
             if not np.any(result.mask) or not set(np.unique(result.mask)) <= {0, 255}:
                 raise RuntimeError('纹理处理未生成黑白字形')
             Image.fromarray(result.mask).save(root / '结果.png')
-    finally:
+    except Exception:
+        # Failure must surface a traceback; the process is disposable either way.
         window.close()
         app.processEvents()
+        raise
+    # Frozen smoke runs are disposable: Qt teardown at interpreter shutdown
+    # can crash under the offscreen platform, so exit without unwinding.
+    print('启动检查通过')
+    sys.stdout.flush()
+    os._exit(0)
