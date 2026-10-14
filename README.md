@@ -73,7 +73,7 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 `ui/platform_integration.py` 提供共享认证、窗口保护和原生更新接入，按需导入共享包；独立产品标识为 `hanzi-mask`。`ui/window.py` 的桌面启动函数依次调用 `start_platform_session` 与 `attach_platform_services`：GUI 启动先完成共享登录（取消登录即退出，不进入本地窗口），登录成功后挂接授权守卫与原生更新。命令行入口保持本地行为，不加载共享模块。
 
-`hanzi-mask` 已在 `hanzi-update` 的 products.json 注册表与服务端登记，更新前置检查依赖平台发布对应的安装包与更新 feed；发布 feed 就绪前检查结果为待发布状态，不影响本地使用。平台依赖使用 `vendor/hanzi_auth-0.2.11-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
+`hanzi-mask` 已在 `hanzi-update` 的 products.json 注册表与服务端登记；v1.0.0 起提供签名安装包与稳定更新源，客户端通过“检查更新”获取后续版本。平台依赖使用 `vendor/hanzi_auth-0.2.11-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
 
 锁定救援保存将已采用的缓存结果固定导出为副本。锁定时协作取消计算并等待任务结束，保留结果缓存和人工清理的撤销记录；更新时，有采用结果则先在后台导出，成功完成并核对保存范围后才继续退出。原生更新准备期间的试探关闭保留缓存，实际关闭仍等待后台任务完成。
 
@@ -167,6 +167,10 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 纹理分离借鉴 [Xu 等人的 RTV 结构提取研究](https://www.cse.cuhk.edu.hk/~leojia/projects/texturesep/)，采用本项目的灰度适配实现。Otsu 和开运算的定义见 [OpenCV 阈值文档](https://docs.opencv.org/4.x/d7/d4d/tutorial_py_thresholding.html)和[形态学文档](https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html)。
 
 同色、同宽且与笔画粘连的斑点，缺少可以由当前几何规则区分的信息。对于需要大批量精确分离真实字形的任务，应先建立人工校对的像素级标注，再训练专门的笔画/背景分割模型，并用独立标注集评估笔画保留率和斑点误留情况。本项目的候选掩膜可作为人工标注的起点，不应直接当作真实标签。
+
+## 原生发布构建
+
+[Build native installers](https://github.com/Normalight/hanzi-mask/actions/workflows/native-build.yml) 手动触发，输入版本号（需先提交对应 `RELEASE_NOTES_v<版本>.md`）并可选平台。流程下载并校验 WinSparkle / Sparkle 官方 SDK，配置 `packaging/native_update_public.json` 的更新源与公钥后构建：Windows x64 产出 Inno Setup 安装器并做安装后冒烟检查，macOS arm64 与 x86_64 产出含 Sparkle 的更新 ZIP。默认仅上传 Artifact；勾选 `publish` 后用仓库 Secrets 签名并发布（需要 `HANZI_UPDATE_PRIVATE_KEY`、`PUBLIC_RELEASE_TOKEN`、`GITCODE_TOKEN`）。也可本机签名后 `packaging/native_publish.py --github-only` 发布 GitHub 侧，GitCode 与平台版本登记由认证服务镜像器自动完成。
 
 ## 桌面构建 CI
 

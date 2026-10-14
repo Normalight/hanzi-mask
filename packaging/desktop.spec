@@ -10,13 +10,17 @@ root = Path(SPECPATH).parent
 sys.path.insert(0, str(root))
 protection = runpy.run_path(str(root / 'packaging/protection.py'))
 source = protection['prepare'](root)
+native_release = runpy.run_path(str(root / 'packaging/native_release.py'))
 # The compiled shared package resolves products.json next to its module at
-# runtime; ship the registry from the installed wheel alongside it.
+# runtime; ship the registry from the installed wheel alongside it. With
+# HANZI_UPDATE_FEED set, native_release also stages the frozen updater config.
+import hanzi_update
 registry = str(Path(hanzi_update.__file__).parent / 'products.json')
 a = Analysis(
     [str(source / 'packaging/entry.py')],
     pathex=[str(source), str(source / 'packaging')],
-    binaries=[], datas=[protection['build_info'](root), (registry, 'hanzi_update')],
+    binaries=[], datas=[protection['build_info'](root), (registry, 'hanzi_update'),
+                        *native_release['analysis_data'](root)],
     hiddenimports=[
         'ui.platform_integration', '_cffi_backend', 'packaging', 'packaging.version',
         'hanzi_auth.desktop', 'hanzi_auth.policy', 'hanzi_auth.channel',
@@ -35,6 +39,7 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='hanzi-mask',
           # Follow the build interpreter's native architecture; Intel runners
           # must not cross-assemble an arm64 binary.
           target_arch=None,
+          version=native_release['exe_version'](root),
           codesign_identity=None)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='hanzi-mask')
 if sys.platform == 'darwin':

@@ -2,9 +2,9 @@
 
 本项目是独立 Git 仓库，桌面显示名为“字形换底”，提供拓片单字的字形掩膜提取、桌面复核、黑底白字 PNG 导出和备份替换。仓库与分发包名为 `hanzi-mask`，Python 包为 `hanzi_mask`，独立产品标识为 `hanzi-mask`。`python app.py` 默认打开 PySide6 客户端；带参数保留命令行行为，`python -m hanzi_mask` 始终为 CLI。桌面代码位于 `ui/`，业务代码位于 `hanzi_mask/`。运行环境为 Python 3.11+；不依赖相邻项目源码或模型。GUI 启动接入共享登录、授权守卫与原生更新；命令行入口保持本地行为，不加载共享模块。安装后的桌面入口为 `hanzi-mask-desktop`，命令行入口为 `hanzi-mask`。
 
-`requirements.txt` 引用本仓库 `vendor/hanzi_auth-0.2.11-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.8-py3-none-any.whl`；`pyproject.toml` 将共享包归入可选 `platform` extra，核心安装不要求平台依赖。使用平台 extra 前先安装本地 requirements，不引用相邻源码。共享包采用已分发 wheel；`hanzi-auth/tools/sync_desktop.py` 当前只覆盖 `group-by-character` 和 `char-detection-main`。将本项目纳入同步前需明确 wheel 与打包脚本目的地，升级时核对包版本和依赖引用，不自动重建存在未提交修改的共享源码。
+`requirements.txt` 引用本仓库 `vendor/hanzi_auth-0.2.12-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.9-py3-none-any.whl`；`pyproject.toml` 将共享包归入可选 `platform` extra，核心安装不要求平台依赖。使用平台 extra 前先安装本地 requirements，不引用相邻源码。`hanzi-auth/tools/sync_desktop.py` 同步 wheel、公共打包脚本与 Sparkle bridge 源到 `group-by-character`、`char-detection-main` 和本项目；升级时人工核对 requirements、platform extra 与 `vendor/manifest.json` 的版本引用，不自动重建存在未提交修改的共享源码。
 
-`ui/platform_integration.py` 提供延迟导入的平台适配，独立产品标识 `PRODUCT = "hanzi-mask"`。`ui/window.py` 的 `main()` 依次调用 `start_platform_session`（取消登录直接退出）与 `attach_platform_services`（授权守卫与原生更新接入）。产品已在 `hanzi-update` 的 products.json 注册表登记（hanzi-auth 0.2.11 / hanzi-update 0.1.8 起），服务端与授权管理从注册表识别 `hanzi-mask`；原生更新依赖平台发布安装包与更新 feed，feed 就绪前更新检查返回待发布，不阻塞本地功能。适配层不修改平台账号与授权。
+`ui/platform_integration.py` 提供延迟导入的平台适配，独立产品标识 `PRODUCT = "hanzi-mask"`。`ui/window.py` 的 `main()` 依次调用 `start_platform_session`（取消登录直接退出）与 `attach_platform_services`（授权守卫与原生更新接入）。产品已在 `hanzi-update` 的 products.json 注册表登记，服务端、授权管理与公共打包脚本从注册表识别 `hanzi-mask`；v1.0.0 起发布签名安装包与稳定更新源（`hanzi-mask-stable`）。适配层不修改平台账号与授权。
 
 平台锁定救援保存将已采用的缓存结果固定导出为副本，不能沿用普通保存控件的原位替换模式。锁定时协作取消计算并等待任务结束，保留结果缓存与 Undo；更新时，有采用结果则先后台导出，仅本次导出成功且采用范围仍一致时允许继续退出。原生更新 `preparing` 阶段的试探关闭不得清理缓存与 Undo，实际退出继续遵守任务结束后清理的生命周期。修改启动接入时覆盖 GUI 启动接线（登录取消不创建窗口）、命令行不加载共享模块、锁定取消与救援导出、更新准备关闭等回归；本地接入不等于平台或原生更新已验收。
 
@@ -70,7 +70,9 @@ python app.py ../10-1dbe -o output/10-1dbe --preview
 
 ZIP 边界：Windows `shutil.make_archive` 默认允许 Zip64；Mac `ditto` 的传统 ZIP 大小字段可能溢出，源文件合计达到 4 GiB 或源条目达到 65,535 时拒绝打包。两平台压缩后核对常规源文件条目大小并执行 ZIP CRC 检查，通过后才生成流式 SHA-256 并上传。不要使用 `archive.read_bytes()` 计算大包摘要。边界测试用临时稀疏文件或降低 Python ZIP64_LIMIT，不触发客户端构建。
 
-`.github/workflows/build.yml` 仅 `workflow_dispatch` 手动触发，可选全部或单一平台；不得在仅配置 CI 的任务中触发构建。Python 3.11，Windows x64 使用 `windows-2022`，macOS arm64 使用 `macos-15`，macOS x86_64 使用 `macos-15-intel`。流程依次校验依赖/原生架构/vendored wheel 摘要、运行测试、Cython 保护、PyInstaller 打包、独立临时目录的成品检查并上传 ZIP 与 SHA-256。版本取 `pyproject.toml`，产物保留 14 天；无发布任务或发布凭据要求。Mac 仅 ad hoc 签名，Developer ID 与公证需后续单独配置。
+`.github/workflows/native-build.yml` 为正式发布构建：输入版本（需已提交 `RELEASE_NOTES_v<版本>.md`）与平台，安装 WinSparkle/Sparkle SDK、Cython 保护后产出 Windows 安装器与 Mac 更新 ZIP；`publish=false` 只上传 Artifact，签名发布由本机密钥或 CI Secrets 完成。更新签名私钥为本机钥匙串 `https://sparkle-project.org` 的 `hanzi-hanzi-mask-stable` 账户与仓库 Secret `HANZI_UPDATE_PRIVATE_KEY`（与 `packaging/native_update_public.json` 公钥配对），私钥不得进入仓库或文档。本地发布：下载三端 Artifact 后用 `packaging/native_appcast.py` 生成签名 feed，`packaging/native_publish.py --github-only` 发布 GitHub 版本与 stable appcast，GitCode 与平台登记由认证服务镜像器完成。`build_mac.sh [arm64|x86_64]` 构建 Mac 原生结构（Runtime.app + 外层产品 app），设置 `HANZI_UPDATE_FEED` 时由 `native_release.py` 生成签名更新包。
+
+`.github/workflows/build.yml` 仅 `workflow_dispatch` 手动触发，可选全部或单一平台，用于快速产物验证；不得在仅配置 CI 的任务中触发构建。Python 3.11，Windows x64 使用 `windows-2022`，macOS arm64 使用 `macos-15`，macOS x86_64 使用 `macos-15-intel`。流程依次校验依赖/原生架构/vendored wheel 摘要、运行测试、Cython 保护、PyInstaller 打包、独立临时目录的成品检查并上传 ZIP 与 SHA-256。版本取 `pyproject.toml`，产物保留 14 天；无发布任务或发布凭据要求。Mac 仅 ad hoc 签名，Developer ID 与公证需后续单独配置。
 
 依赖统一在 `packaging/requirements-build.txt`，平台 requirements 引用它。`packaging/build_desktop.py --check --target macos-arm64` 仅检查，无编译；`--target` 不带 `--check` 才实际构建。保护后的业务入口包含 `ui/window.py`；成品的 `--smoke-test` 检查本地窗口、图片编解码和 texture 求解，不启用认证或更新。不需要训练模型、邻仓源码、GitCode 或更新 SDK 原生发行资源。
 

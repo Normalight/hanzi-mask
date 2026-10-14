@@ -6,25 +6,26 @@
     "tool": "../hanzi-auth/tools/sync_desktop.py",
     "current_targets": [
       "group-by-character",
-      "char-detection-main"
+      "char-detection-main",
+      "hanzi-mask"
     ],
-    "includes_hanzi_mask": false,
-    "maintenance": "现有同步工具仅覆盖上述两个客户端。此项目目前显式维护依赖副本；未来应有意识地扩展同步清单、核对版本和摘要并验证受影响客户端。"
+    "includes_hanzi_mask": true,
+    "maintenance": "三个客户端统一由同步工具维护 wheel、公共打包脚本与 Sparkle bridge 源；requirements、pyplatform extra 与本清单的版本引用升级时人工核对。"
   },
   "wheels": [
     {
       "distribution": "hanzi-update",
-      "version": "0.1.8",
-      "filename": "hanzi_update-0.1.8-py3-none-any.whl",
-      "size": 22326,
-      "sha256": "675e6071ec25f25074b46f438d611bdc58d90085242b089e535bf8f29f4b61e9"
+      "version": "0.1.9",
+      "filename": "hanzi_update-0.1.9-py3-none-any.whl",
+      "size": 22365,
+      "sha256": "641c1a00942a6226039e9c4ff97a0fcf8f4f913a448f6881d515447df8fa2323"
     },
     {
       "distribution": "hanzi-auth",
-      "version": "0.2.11",
-      "filename": "hanzi_auth-0.2.11-py3-none-any.whl",
-      "size": 130545,
-      "sha256": "43bce5ff08e89eba116eb39e6bde52d619f61e63ca40066413e8a53bd05f840c"
+      "version": "0.2.12",
+      "filename": "hanzi_auth-0.2.12-py3-none-any.whl",
+      "size": 130546,
+      "sha256": "80357a2f2c1ce97b849c139ed2b01297d1bd431a4bccd8158872997f8f3c84ff"
     }
   ]
 }
