@@ -102,7 +102,8 @@ jobs:
           python -m PyInstaller --noconfirm --clean packaging/desktop.spec
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $exe_dist = 'dist\hanzi-mask\hanzi-mask.exe'
-          python -c "import subprocess,sys; subprocess.run([sys.argv[1], '--smoke-test'], check=True, timeout=240)" $exe_dist
+          $smoke_dist = "exec('import subprocess,sys\ntry:\n    subprocess.run([sys.argv[1], \'--smoke-test\'], check=True, timeout=240)\nexcept subprocess.TimeoutExpired:\n    print(\'first dist smoke attempt timed out; retrying once after first-run scans settle\')\n    subprocess.run([sys.argv[1], \'--smoke-test\'], check=True, timeout=240)\n')"
+          python -c $smoke_dist $exe_dist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python packaging/native_release.py windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
