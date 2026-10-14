@@ -27,7 +27,8 @@ a = Analysis([str(code_root / 'packaging/entry.py')],
     hookspath=[], runtime_hooks=[],
     excludes=['PyQt5', 'PyQt6', 'PySide2', 'tkinter', 'pytest', 'torch',
               'transformers', 'hanzi_auth.server', 'hanzi_auth.cli'], noarchive=False)
-runpy.run_path(str(root / 'packaging/slimming.py'))['apply'](a, root)
+# No slimming here: the shared slimming helper prunes onnxruntime, which this
+# product does not ship.
 protection['apply'](a, code_root)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='runtime',
