@@ -5,6 +5,11 @@ import sys
 import tempfile
 
 
+def _stage(name):
+    print('smoke:' + name)
+    sys.stdout.flush()
+
+
 def smoke_test():
     if not getattr(sys, 'frozen', False):
         raise RuntimeError('启动检查必须使用打包后的可执行文件')
@@ -12,11 +17,15 @@ def smoke_test():
     from PIL import Image, ImageDraw
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QImageReader
+    _stage('qt-import')
     from ui.window import MainWindow
     from hanzi_mask.processing import process_image
 
+    _stage('qt-app')
     app = QApplication.instance() or QApplication([])
+    _stage('main-window')
     window = MainWindow()
+    _stage('window-show')
     window.show()
     app.processEvents()
     try:
@@ -26,11 +35,13 @@ def smoke_test():
                for name in sys.modules):
             raise RuntimeError('本地启动加载了平台或训练模块')
         # The product registry must be readable inside the bundle for login.
+        _stage('registry')
         from hanzi_update.core import REGISTRY
         if 'hanzi-mask' not in REGISTRY:
             raise RuntimeError('产品注册表缺少字形换底')
         if Path(window.output.text()).is_relative_to(Path(sys._MEIPASS)):
             raise RuntimeError('默认保存目录位于应用资源内')
+        _stage('image-codecs')
         with tempfile.TemporaryDirectory(prefix='字形换底-启动检查-') as temporary:
             root = Path(temporary)
             image = Image.new('RGB', (80, 96), '#222222')
@@ -42,6 +53,7 @@ def smoke_test():
                 image.save(path)
                 if QImageReader(str(path)).read().isNull():
                     raise RuntimeError(f'图片解码失败：{extension}')
+            _stage('texture')
             result = process_image(root / '图片.png', window._all_options)
             if result.mask.shape != (96, 80) or result.mask.dtype != np.uint8:
                 raise RuntimeError('纹理处理改变了图像尺寸或格式')
@@ -50,11 +62,11 @@ def smoke_test():
             Image.fromarray(result.mask).save(root / '结果.png')
     except Exception:
         # Failure must surface a traceback; the process is disposable either way.
+        _stage('failure-close')
         window.close()
         app.processEvents()
         raise
     # Frozen smoke runs are disposable: Qt teardown at interpreter shutdown
     # can crash under the offscreen platform, so exit without unwinding.
-    print('启动检查通过')
-    sys.stdout.flush()
+    _stage('done')
     os._exit(0)

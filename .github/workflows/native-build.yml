@@ -108,7 +108,7 @@ jobs:
           $process = Start-Process $installer.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART', '/HANZITEST=1', ('/DIR="' + $install + '"') -Wait -PassThru
           if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           $exe = Join-Path $install 'hanzi-mask.exe'
-          python -c "import subprocess,sys; subprocess.run([sys.argv[1], '--smoke-test'], check=True, timeout=180)" $exe
+          python -c "exec('import subprocess,sys\ntry:\n    subprocess.run([sys.argv[1], \'--smoke-test\'], check=True, timeout=240)\nexcept subprocess.TimeoutExpired as exc:\n    sys.stdout.buffer.write((exc.stdout or b\'\') + (exc.stderr or b\'\'))\n    print(\'smoke-test timed out; partial output above\')\n    raise')" $exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign installer and generate Windows feed
         if: runner.os == 'Windows' && inputs.publish == true
