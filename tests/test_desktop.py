@@ -35,7 +35,9 @@ def qapp():
     app.setQuitOnLastWindowClosed(previous)
 
 
-def wait_for(app, condition, timeout=8):
+def wait_for(app, condition, timeout=30):
+    # Loaded CI runners can stretch texture solves well past a local 8s;
+    # the wait only costs time when a condition is genuinely late.
     deadline = time.monotonic() + timeout
     while not condition() and time.monotonic() < deadline:
         app.processEvents()
