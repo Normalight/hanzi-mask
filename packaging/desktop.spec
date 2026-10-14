@@ -27,7 +27,9 @@ protection['apply'](a, source)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='hanzi-mask',
           console=False, strip=False, upx=False,
-          target_arch='arm64' if sys.platform == 'darwin' else None,
+          # Follow the build interpreter's native architecture; Intel runners
+          # must not cross-assemble an arm64 binary.
+          target_arch=None,
           codesign_identity=None)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='hanzi-mask')
 if sys.platform == 'darwin':

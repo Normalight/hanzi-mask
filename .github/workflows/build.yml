@@ -6,7 +6,7 @@ on:
       target:
         description: 构建平台
         type: choice
-        options: [all, windows-x64, macos-arm64]
+        options: [all, windows-x64, macos-arm64, macos-x86_64]
         default: all
 
 permissions:
@@ -32,6 +32,10 @@ jobs:
           - target: macos-arm64
             runner: macos-15
             architecture: arm64
+            requirements: mac
+          - target: macos-x86_64
+            runner: macos-15-intel
+            architecture: x64
             requirements: mac
     env:
       QT_QPA_PLATFORM: offscreen

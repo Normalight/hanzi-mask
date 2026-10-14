@@ -70,7 +70,7 @@ python app.py ../10-1dbe -o output/10-1dbe --preview
 
 ZIP 边界：Windows `shutil.make_archive` 默认允许 Zip64；Mac `ditto` 的传统 ZIP 大小字段可能溢出，源文件合计达到 4 GiB 或源条目达到 65,535 时拒绝打包。两平台压缩后核对常规源文件条目大小并执行 ZIP CRC 检查，通过后才生成流式 SHA-256 并上传。不要使用 `archive.read_bytes()` 计算大包摘要。边界测试用临时稀疏文件或降低 Python ZIP64_LIMIT，不触发客户端构建。
 
-`.github/workflows/build.yml` 仅 `workflow_dispatch` 手动触发，可选全部或单一平台；不得在仅配置 CI 的任务中触发构建。Python 3.11，Windows x64 使用 `windows-2022`，macOS arm64 使用 `macos-15`。流程依次校验依赖/原生架构/vendored wheel 摘要、运行测试、Cython 保护、PyInstaller 打包、独立临时目录的成品检查并上传 ZIP 与 SHA-256。版本取 `pyproject.toml`，产物保留 14 天；无发布任务或发布凭据要求。Mac 仅 ad hoc 签名，Developer ID 与公证需后续单独配置。
+`.github/workflows/build.yml` 仅 `workflow_dispatch` 手动触发，可选全部或单一平台；不得在仅配置 CI 的任务中触发构建。Python 3.11，Windows x64 使用 `windows-2022`，macOS arm64 使用 `macos-15`，macOS x86_64 使用 `macos-15-intel`。流程依次校验依赖/原生架构/vendored wheel 摘要、运行测试、Cython 保护、PyInstaller 打包、独立临时目录的成品检查并上传 ZIP 与 SHA-256。版本取 `pyproject.toml`，产物保留 14 天；无发布任务或发布凭据要求。Mac 仅 ad hoc 签名，Developer ID 与公证需后续单独配置。
 
 依赖统一在 `packaging/requirements-build.txt`，平台 requirements 引用它。`packaging/build_desktop.py --check --target macos-arm64` 仅检查，无编译；`--target` 不带 `--check` 才实际构建。保护后的业务入口包含 `ui/window.py`；成品的 `--smoke-test` 检查本地窗口、图片编解码和 texture 求解，不启用认证或更新。不需要训练模型、邻仓源码、GitCode 或更新 SDK 原生发行资源。
 

@@ -111,3 +111,8 @@ def test_streamed_checksum_matches_file(tmp_path):
     data = bytes(1024 * 1024 + 17)
     path.write_bytes(data)
     assert builder.file_sha256(path) == sha256(data).hexdigest()
+
+
+def test_mac_targets_require_native_build_architectures():
+    assert builder.TARGETS['macos-x86_64'] == ('darwin', {'x86_64', 'amd64'})
+    assert builder.TARGETS['macos-arm64'] == ('darwin', {'arm64', 'aarch64'})

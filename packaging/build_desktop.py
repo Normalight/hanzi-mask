@@ -15,7 +15,8 @@ import unicodedata
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {'windows-x64': ('win32', {'amd64', 'x86_64'}),
-           'macos-arm64': ('darwin', {'arm64', 'aarch64'})}
+           'macos-arm64': ('darwin', {'arm64', 'aarch64'}),
+           'macos-x86_64': ('darwin', {'x86_64', 'amd64'})}
 
 
 def validate_mac_archive_size(bundle):
@@ -77,7 +78,7 @@ def build(target):
     environment.setdefault('HANZI_PROTECT', '1')
     subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
                     'packaging/desktop.spec'], cwd=ROOT, env=environment, check=True)
-    if target == 'macos-arm64':
+    if sys.platform == 'darwin':
         bundle = ROOT / 'dist/字形换底.app'
         # PyInstaller signs binaries ad hoc. Sign the complete app after assembly.
         subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(bundle)], check=True)
@@ -92,7 +93,7 @@ def build(target):
     release = ROOT / 'dist/release'
     release.mkdir(exist_ok=True)
     archive = release / f'字形换底-v{version}-{target}.zip'
-    if target == 'macos-arm64':
+    if sys.platform == 'darwin':
         validate_mac_archive_size(bundle)
         subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent',
                         str(bundle), str(archive)], check=True)
