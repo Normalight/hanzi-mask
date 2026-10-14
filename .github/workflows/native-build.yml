@@ -224,4 +224,4 @@ jobs:
       - name: Publish signed release and stable feeds
         run: |
           python packaging/native_publish.py --product "$PRODUCT" --version "$PACKAGE_VERSION" \
-            --assets assets --notes "RELEASE_NOTES_$PACKAGE_VERSION.md" --source-commit "$GITHUB_SHA" --target "${{ inputs.target || 'all' }}"
+            --assets assets --notes "RELEASE_NOTES_$PACKAGE_VERSION.md" --source-commit "$GITHUB_SHA" --target "${{ inputs.target || 'all' }}" --github-only
