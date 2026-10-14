@@ -10,10 +10,51 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import zipfile
+import unicodedata
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {'windows-x64': ('win32', {'amd64', 'x86_64'}),
            'macos-arm64': ('darwin', {'arm64', 'aarch64'})}
+
+
+def validate_mac_archive_size(bundle):
+    # ditto can silently wrap 32-bit sizes instead of producing valid Zip64.
+    entries = list(bundle.rglob('*'))
+    sizes = [path.stat().st_size for path in entries
+             if path.is_file() and not path.is_symlink()]
+    if len(entries) + 1 >= 65535 or sum(sizes) >= 2**32:
+        raise RuntimeError('Mac 应用超过传统 ZIP 容量，ditto 不能安全生成 Zip64；需调整打包方式')
+
+
+def verify_archive(archive, bundle):
+    with zipfile.ZipFile(archive) as contents:
+        entries = {}
+        for entry in contents.infolist():
+            name = entry.filename
+            # ditto writes UTF-8 names without consistently setting the UTF-8 bit.
+            if not entry.flag_bits & 0x800:
+                try:
+                    name = name.encode('cp437').decode('utf-8')
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    pass
+            entries[unicodedata.normalize('NFC', name)] = entry
+        for path in bundle.rglob('*'):
+            if path.is_file() and not path.is_symlink():
+                name = unicodedata.normalize('NFC', path.relative_to(bundle.parent).as_posix())
+                if name not in entries or entries[name].file_size != path.stat().st_size:
+                    raise RuntimeError(f'ZIP 文件大小不匹配：{name}')
+        bad_file = contents.testzip()
+        if bad_file is not None:
+            raise RuntimeError(f'ZIP 完整性检查失败：{bad_file}')
+
+
+def file_sha256(path):
+    digest = sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def validate(target):
@@ -52,13 +93,15 @@ def build(target):
     release.mkdir(exist_ok=True)
     archive = release / f'字形换底-v{version}-{target}.zip'
     if target == 'macos-arm64':
+        validate_mac_archive_size(bundle)
         subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent',
                         str(bundle), str(archive)], check=True)
     else:
         shutil.make_archive(str(archive.with_suffix('')), 'zip',
                             root_dir=bundle.parent, base_dir=bundle.name)
+    verify_archive(archive, bundle)
     archive.with_suffix('.zip.sha256').write_text(
-        f'{sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n', encoding='utf-8')
+        f'{file_sha256(archive)}  {archive.name}\n', encoding='utf-8')
     print(archive)
 
 

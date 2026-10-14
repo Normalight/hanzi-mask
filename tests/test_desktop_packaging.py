@@ -3,6 +3,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import tomllib
+import shutil
+import zipfile
+from hashlib import sha256
 
 import pytest
 
@@ -69,3 +72,42 @@ def test_check_mode_does_not_build(monkeypatch):
     monkeypatch.setattr(builder, 'validate', lambda _: '0.3.0')
     monkeypatch.setattr(builder, 'build', lambda _: pytest.fail('check mode started a build'))
     builder.main()
+
+
+def test_windows_archive_automatically_uses_zip64(monkeypatch, tmp_path):
+    bundle = tmp_path / 'app'
+    bundle.mkdir()
+    (bundle / 'data.bin').write_bytes(bytes(4096))
+    monkeypatch.setattr(zipfile, 'ZIP64_LIMIT', 1024)
+    archive = Path(shutil.make_archive(str(tmp_path / 'windows'), 'zip',
+                                      root_dir=tmp_path, base_dir='app'))
+    builder.verify_archive(archive, bundle)
+    with zipfile.ZipFile(archive) as contents:
+        assert contents.getinfo('app/data.bin').extract_version == 45
+
+
+def test_mac_rejects_large_sparse_file_without_compressing(tmp_path):
+    bundle = tmp_path / 'app'
+    bundle.mkdir()
+    with (bundle / 'large.bin').open('wb') as stream:
+        stream.truncate(2**32 + 1)
+    with pytest.raises(RuntimeError, match='Zip64'):
+        builder.validate_mac_archive_size(bundle)
+
+
+def test_archive_rejects_truncated_entry(tmp_path):
+    bundle = tmp_path / 'app'
+    bundle.mkdir()
+    (bundle / 'data.bin').write_bytes(b'complete data')
+    archive = tmp_path / 'bad.zip'
+    with zipfile.ZipFile(archive, 'w') as contents:
+        contents.writestr('app/data.bin', b'x')
+    with pytest.raises(RuntimeError, match='大小不匹配'):
+        builder.verify_archive(archive, bundle)
+
+
+def test_streamed_checksum_matches_file(tmp_path):
+    path = tmp_path / 'data.bin'
+    data = bytes(1024 * 1024 + 17)
+    path.write_bytes(data)
+    assert builder.file_sha256(path) == sha256(data).hexdigest()

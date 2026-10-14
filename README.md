@@ -170,6 +170,8 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 ## 桌面构建 CI
 
+Windows 压缩使用 Python `shutil.make_archive`，按需启用 Zip64。Mac 使用 `ditto` 保留应用元数据：当源文件总大小达到 4 GiB 或源条目数达到 65,535 时提前停止，不依赖其生成 Zip64。两平台生成 ZIP 后逐文件核对源大小并检查 CRC，通过后才生成流式 SHA-256 校验文件和上传；额外元数据或压缩开销造成的问题由成品检查发现。大包不会被整包读入内存计算摘要。
+
 [Build desktop apps](https://github.com/Normalight/hanzi-mask/actions/workflows/build.yml) 仅支持手动 `workflow_dispatch`，可选择两个平台或单个平台；提交、PR、标签和 Release 不自动启动。使用 Python 3.11，在 Windows x64（`windows-2022`）和 macOS arm64（`macos-15`）执行依赖及 wheel 校验、测试、Cython 保护、PyInstaller 打包和独立目录下的成品启动检查。运行器架构见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
 
 版本读取 `pyproject.toml`。成品为 `字形换底-v<版本>-windows-x64.zip`（解压后运行 `hanzi-mask/hanzi-mask.exe`）和 `字形换底-v<版本>-macos-arm64.zip`（内含 `字形换底.app`），附 SHA-256 校验文件，Actions 保留 14 天。Mac 使用 ad hoc 签名，未进行 Developer ID 签名或公证。认证与更新启动调用仍保持注释；工作流仅上传构建产物，没有发布步骤或发布密钥依赖。
