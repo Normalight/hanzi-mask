@@ -134,3 +134,17 @@ def test_method_parameters_reach_the_report(tmp_path, method):
     if method == "texture":
         assert report["images"][0]["texture_strength"] == 0.006
         assert report["images"][0]["texture_scale"] == 2
+
+
+def test_report_name_collision_retries_with_unique_suffix(tmp_path, monkeypatch):
+    import hanzi_mask.cli as cli
+
+    source, output = tmp_path / "原图", tmp_path / "结果"
+    character(source / "字_2.png")
+    # A coarse or frozen clock can repeat time_ns() between rapid runs; the
+    # exclusive publication must retry with a fresh unique report name.
+    monkeypatch.setattr(cli.time, "time_ns", lambda: 1791984308369105500)
+    assert main([str(source), "-o", str(output)]) == 0
+    assert main([str(source), "-o", str(output), "--overwrite"]) == 0
+    reports = sorted(path.name for path in output.glob("report-*.json"))
+    assert len(reports) == 2 and reports[0] != reports[1]

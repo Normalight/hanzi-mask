@@ -24,6 +24,10 @@ def smoke_test():
         if any(name.split('.')[0] in {'hanzi_auth', 'hanzi_update', 'torch'}
                for name in sys.modules):
             raise RuntimeError('本地启动加载了平台或训练模块')
+        # The product registry must be readable inside the bundle for login.
+        from hanzi_update.core import REGISTRY
+        if 'hanzi-mask' not in REGISTRY:
+            raise RuntimeError('产品注册表缺少字形换底')
         if Path(window.output.text()).is_relative_to(Path(sys._MEIPASS)):
             raise RuntimeError('默认保存目录位于应用资源内')
         with tempfile.TemporaryDirectory(prefix='字形换底-启动检查-') as temporary:

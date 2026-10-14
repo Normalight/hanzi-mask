@@ -48,8 +48,11 @@ def test_unavailable_cpu_information_does_not_prevent_startup(monkeypatch):
 @pytest.mark.parametrize("pages,page_size,expected", [(1024, 4096, 4194304), (0, 4096, None), (1024, -1, None)])
 def test_posix_memory_detection_handles_values_and_invalid_information(monkeypatch, pages, page_size, expected):
     monkeypatch.setattr(concurrency.sys, "platform", "linux")
+    # Windows ships os as a frozen module without sysconf; the simulation
+    # installs the POSIX attribute explicitly.
     monkeypatch.setattr(concurrency.os, "sysconf",
-                        lambda name: {"SC_PHYS_PAGES": pages, "SC_PAGE_SIZE": page_size}[name])
+                        lambda name: {"SC_PHYS_PAGES": pages, "SC_PAGE_SIZE": page_size}[name],
+                        raising=False)
     assert concurrency._total_memory_bytes() == expected
 
 
@@ -59,7 +62,7 @@ def test_posix_memory_detection_failure_falls_back_to_cpu_limits(monkeypatch):
     def unavailable(_):
         raise OSError("memory information unavailable")
 
-    monkeypatch.setattr(concurrency.os, "sysconf", unavailable)
+    monkeypatch.setattr(concurrency.os, "sysconf", unavailable, raising=False)
     monkeypatch.setattr(concurrency.os, "cpu_count", lambda: 10)
     assert concurrency.worker_limits() == concurrency.WorkerLimits(10, 4, 2, None)
 

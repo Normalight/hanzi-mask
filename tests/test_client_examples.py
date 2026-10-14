@@ -108,7 +108,9 @@ def test_default_cli_covers_all_curated_examples_with_desktop_options(tmp_path, 
     assert report['count'] == 16
     selected = {record['source'] for record in report['images']}
     assert selected == {str(source) for source in sources}
-    assert special <= {record['source'].rsplit('/', 1)[-1] for record in report['images']}
+    # str(path) keeps the native separator; normalize before taking the name.
+    assert special <= {record['source'].replace('\\', '/').rsplit('/', 1)[-1]
+                       for record in report['images']}
     assert report['parameters']['profile'] == 'balanced'
     for name in ('keep_isolated', 'edge_refine', 'stroke_recovery', 'tip_recovery'):
         assert report['parameters'][name] is True

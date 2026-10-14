@@ -4,16 +4,21 @@ from pathlib import Path
 import runpy
 import sys
 
+import hanzi_update
+
 root = Path(SPECPATH).parent
 sys.path.insert(0, str(root))
 protection = runpy.run_path(str(root / 'packaging/protection.py'))
 source = protection['prepare'](root)
+# The compiled shared package resolves products.json next to its module at
+# runtime; ship the registry from the installed wheel alongside it.
+registry = str(Path(hanzi_update.__file__).parent / 'products.json')
 a = Analysis(
     [str(source / 'packaging/entry.py')],
     pathex=[str(source), str(source / 'packaging')],
-    binaries=[], datas=[protection['build_info'](root)],
+    binaries=[], datas=[protection['build_info'](root), (registry, 'hanzi_update')],
     hiddenimports=[
-        'ui.platform_integration', '_cffi_backend',
+        'ui.platform_integration', '_cffi_backend', 'packaging', 'packaging.version',
         'hanzi_auth.desktop', 'hanzi_auth.policy', 'hanzi_auth.channel',
         'hanzi_auth.credentials', 'hanzi_auth.single_instance',
         'hanzi_update.core', 'hanzi_update.native_ui',

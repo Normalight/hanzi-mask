@@ -202,7 +202,17 @@ def run(args: argparse.Namespace, command: argparse.ArgumentParser) -> int:
         "images": records,
     }
     report_path = output / f"report-{run_id}.json"
-    write_output(report_path, json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+    payload = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
+    # Windows runners can repeat a coarse time_ns() tick between rapid runs;
+    # exclusive publication then collides. Retry with a fresh unique name.
+    for attempt in range(100):
+        try:
+            write_output(report_path, payload)
+            break
+        except FileExistsError:
+            report_path = output / f"report-{time.time_ns()}-{attempt + 1}.json"
+    else:
+        raise RuntimeError("无法为运行报告生成唯一文件名")
     print(f"\n完成 {summary['converted']}，跳过 {summary['skipped']}，失败 {summary['error']}")
     print(f"报告：{report_path}")
     print("结果是候选字形，请结合对照图复核笔画与残留斑点。")
