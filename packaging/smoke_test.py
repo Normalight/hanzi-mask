@@ -41,6 +41,15 @@ def smoke_test():
             raise RuntimeError('产品注册表缺少字形换底')
         if Path(window.output.text()).is_relative_to(Path(sys._MEIPASS)):
             raise RuntimeError('默认保存目录位于应用资源内')
+        # 登录引导在任何窗口出现之前就会获取按产品的单实例锁；
+        # 产品不被共享会话接受时在这里崩溃，必须提前拦截。
+        _stage('single-instance')
+        from hanzi_auth.single_instance import SingleInstance
+        with tempfile.TemporaryDirectory(prefix='字形换底-启动检查-锁-') as lock_dir:
+            guard = SingleInstance('hanzi-mask', lock_dir)
+            if not guard.acquire():
+                raise RuntimeError('单实例锁获取失败')
+            guard.close()
         _stage('image-codecs')
         with tempfile.TemporaryDirectory(prefix='字形换底-启动检查-') as temporary:
             root = Path(temporary)
