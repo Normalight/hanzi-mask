@@ -13,11 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_WHEELS = {
     "hanzi_update-0.1.9-py3-none-any.whl": (
         "hanzi-update", "0.1.9",
-        "7a00c2be6cbcd88e0ce0a0616da559cce02a4415db24cf5cbba70fb8279c3ae1",
+        "2f669201693968e3a11449aa4a63f168e1f3d6bbca3634b489d3762e00384698",
     ),
-    "hanzi_auth-0.2.13-py3-none-any.whl": (
-        "hanzi-auth", "0.2.13",
-        "ed01bc4b9e9e0f2d69b5b72b73b95bd9f2bd48fc429cb58a5659b01c45694823",
+    "hanzi_auth-0.2.15-py3-none-any.whl": (
+        "hanzi-auth", "0.2.15",
+        "a2e133c3b9b64972a95ddc4f9b5a9810e52c0fab2578daf3118e4386fa744c1e",
     ),
 }
 
@@ -63,7 +63,7 @@ def test_requirements_install_local_update_before_authentication():
     requirements = [line.strip() for line in (ROOT / "requirements.txt").read_text().splitlines()
                     if line.strip() and not line.lstrip().startswith("#")]
     update = "./vendor/hanzi_update-0.1.9-py3-none-any.whl"
-    auth = "./vendor/hanzi_auth-0.2.13-py3-none-any.whl"
+    auth = "./vendor/hanzi_auth-0.2.15-py3-none-any.whl"
     assert requirements.count(update) == requirements.count(auth) == 1
     assert requirements.index(update) < requirements.index(auth)
     assert {line for line in requirements if line.endswith(".whl")} == {update, auth}
@@ -73,7 +73,7 @@ def test_requirements_install_local_update_before_authentication():
 def test_platform_extra_is_precisely_pinned_and_core_dependencies_remain_independent():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert set(project["optional-dependencies"]["platform"]) == {
-        "hanzi-auth==0.2.13", "hanzi-update==0.1.9",
+        "hanzi-auth==0.2.15", "hanzi-update==0.1.9",
     }
     base = [Requirement(value) for value in project["dependencies"]]
     assert {requirement.name for requirement in base} == {

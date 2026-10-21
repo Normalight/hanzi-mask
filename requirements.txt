@@ -4,4 +4,4 @@ Pillow>=10.4,<13
 scipy>=1.11,<2
 PySide6>=6.6,<7
 ./vendor/hanzi_update-0.1.9-py3-none-any.whl
-./vendor/hanzi_auth-0.2.13-py3-none-any.whl
+./vendor/hanzi_auth-0.2.15-py3-none-any.whl

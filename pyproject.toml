@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hanzi-mask"
-version = "1.0.1"
+version = "1.0.2"
 description = "字形换底客户端：拓片单字复核、自动备份原位置保存与黑底白字导出"
 requires-python = ">=3.11"
 dependencies = [
@@ -18,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 platform = [
   "hanzi-update==0.1.9",
-  "hanzi-auth==0.2.13",
+  "hanzi-auth==0.2.15",
 ]
 
 [project.scripts]

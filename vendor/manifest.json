@@ -17,15 +17,15 @@
       "distribution": "hanzi-update",
       "version": "0.1.9",
       "filename": "hanzi_update-0.1.9-py3-none-any.whl",
-      "size": 22365,
-      "sha256": "7a00c2be6cbcd88e0ce0a0616da559cce02a4415db24cf5cbba70fb8279c3ae1"
+      "size": 22366,
+      "sha256": "2f669201693968e3a11449aa4a63f168e1f3d6bbca3634b489d3762e00384698"
     },
     {
       "distribution": "hanzi-auth",
-      "version": "0.2.13",
-      "filename": "hanzi_auth-0.2.13-py3-none-any.whl",
-      "size": 130529,
-      "sha256": "ed01bc4b9e9e0f2d69b5b72b73b95bd9f2bd48fc429cb58a5659b01c45694823"
+      "version": "0.2.15",
+      "filename": "hanzi_auth-0.2.15-py3-none-any.whl",
+      "size": 131083,
+      "sha256": "a2e133c3b9b64972a95ddc4f9b5a9810e52c0fab2578daf3118e4386fa744c1e"
     }
   ]
 }
