@@ -44,6 +44,37 @@ def test_batch_preserves_sources_and_existing_outputs(tmp_path):
         assert image.size == (64, 64)
 
 
+@pytest.mark.parametrize("foreground", ["light", "dark"])
+@pytest.mark.parametrize("output_style", [None, "black-on-white", "white-on-black"])
+def test_cli_output_and_preview_use_selected_colors(tmp_path, foreground, output_style):
+    source, output = tmp_path / "glyph.png", tmp_path / "output"
+    character(source)
+    if foreground == "dark":
+        with Image.open(source) as image:
+            pixels = 255 - np.asarray(image)
+        Image.fromarray(pixels).save(source)
+    original = source.read_bytes()
+    args = [str(source), "-o", str(output), "--preview", "--foreground", foreground,
+            "--method", "morphology", "--median-size", "1", "--threshold", "127",
+            "--stroke-radius", "0", "--min-area", "0"]
+    if output_style is not None:
+        args += ["--output-style", output_style]
+    assert main(args) == 0
+    white_background = output_style != "white-on-black"
+    with Image.open(output / source.name) as image:
+        assert image.size == (64, 64)
+        assert set(np.unique(np.asarray(image))) == {0, 255}
+        assert image.getpixel((0, 0)) == (255 if white_background else 0)
+        assert image.getpixel((25, 30)) == (0 if white_background else 255)
+    report = latest_report(output)
+    assert report["output_style"] == (output_style or "black-on-white")
+    with Image.open(output / report["previews"][0]) as preview:
+        gray = preview.convert("L")
+        assert gray.getpixel((240, 60)) > 220 if white_background else gray.getpixel((240, 60)) < 35
+        assert gray.getpixel((307, 140)) < 35 if white_background else gray.getpixel((307, 140)) > 220
+    assert source.read_bytes() == original
+
+
 def test_recursive_discovery_excludes_output_and_mask_directories(tmp_path):
     source = tmp_path / "input"
     output, masks = source / "output", source / "masks"

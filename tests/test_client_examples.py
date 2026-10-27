@@ -33,6 +33,9 @@ def test_examples_keep_source_bytes_and_export_binary_at_original_size(tmp_path)
     with Image.open(output / record["expected"]) as image:
         assert image.size == (72, 64)
         assert set(np.unique(np.asarray(image))) == {0, 255}
+        assert image.getpixel((0, 0)) == 255
+        assert image.getpixel((22, 30)) == 0
+    assert report["output_style"] == "black-on-white"
     assert report["parameters"]["method"] == "texture"
     assert json.loads((output / "manifest.json").read_text())["count"] == 1
     assert record["needs_visual_review"] is True
@@ -112,6 +115,7 @@ def test_default_cli_covers_all_curated_examples_with_desktop_options(tmp_path, 
     assert special <= {record['source'].replace('\\', '/').rsplit('/', 1)[-1]
                        for record in report['images']}
     assert report['parameters']['profile'] == 'balanced'
+    assert report['parameters']['texture_strength'] == 0
     for name in ('keep_isolated', 'edge_refine', 'stroke_recovery', 'tip_recovery'):
         assert report['parameters'][name] is True
     for source, before in original_bytes.items():

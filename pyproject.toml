@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hanzi-mask"
-version = "1.0.2"
-description = "字形换底客户端：拓片单字复核、自动备份原位置保存与黑底白字导出"
+version = "1.0.3"
+description = "字形换底客户端：拓片单字复核、自动备份原位置保存与白底黑字/黑底白字导出"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26,<3",

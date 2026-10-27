@@ -2,9 +2,11 @@ from PIL import Image, ImageDraw, ImageOps
 import numpy as np
 
 from .processing import Result
+from .output_style import DEFAULT_OUTPUT_STYLE, render_mask
 
 
-def comparison_tile(name: str, result: Result) -> Image.Image:
+def comparison_tile(name: str, result: Result,
+                    output_style: str = DEFAULT_OUTPUT_STYLE) -> Image.Image:
     """Red=removed candidate; cyan=foreground added by smoothing or a mask."""
     overlay = np.asarray(result.original).copy()
     removed = (result.candidate > 0) & (result.mask == 0)
@@ -18,7 +20,7 @@ def comparison_tile(name: str, result: Result) -> Image.Image:
     canvas = Image.new("RGB", (660, 250), "#eeeeee")
     draw = ImageDraw.Draw(canvas)
     draw.text((10, 8), name, fill="black")
-    images = [result.original, Image.fromarray(result.mask), Image.fromarray(overlay)]
+    images = [result.original, Image.fromarray(render_mask(result.mask, output_style)), Image.fromarray(overlay)]
     for index, (label, source) in enumerate(zip(["SOURCE", "MASK", "CHANGES"], images)):
         tile = ImageOps.contain(source, (210, 205), Image.Resampling.LANCZOS)
         if index == 1:

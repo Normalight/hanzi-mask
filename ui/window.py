@@ -4,24 +4,26 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import sys
+import os
 import tempfile
 
-from PySide6.QtCore import QSignalBlocker, Qt, QTimer, QUrl, Slot
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QRectF, QSignalBlocker, QSize, Qt, QTimer, QUrl, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
+    QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from hanzi_mask import __version__
 from hanzi_mask.batch_service import BatchResult, SaveSummary
-from hanzi_mask.concurrency import worker_limits
+from hanzi_mask.output_style import DEFAULT_OUTPUT_STYLE, OUTPUT_STYLES
 from hanzi_mask.processing import Options, Result
-from hanzi_mask.texture import TEXTURE_PROFILES
 from .canvas import PreviewPanel
+from .history_shortcuts import history_key_bindings
+from .input_dialog import ImageInputDialog
 from .paths import default_output
 from .review_hints import review_hints
 from .task_worker import PreviewWorker, TaskWorker
@@ -29,11 +31,11 @@ from .task_worker import PreviewWorker, TaskWorker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = '字形换底'
-IMAGE_FILTER = '图片 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)'
+CORRECTION_NAMES = {'brush_cut': '画笔分割', 'brush_fill': '画笔填补', 'select': '清理色块'}
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, initial_paths=None, examples_root=None):
+    def __init__(self, initial_paths=None):
         super().__init__()
         self.setWindowTitle(f'{APP_NAME} · {__version__}')
         self.resize(1400, 900)
@@ -44,27 +46,26 @@ class MainWindow(QMainWindow):
         self.records = {}
         self.errors = {}
         self._correction_history = {}
-        self._texture_strength = None
-        self._strength_input_editing = False
-        self._strength_input_cancelled = False
+        self._correction_redo = {}
+        self._history_view_key = None
         self._tuning_paused = 0
         self._tuning_generation = 0
         self._pending_preview = None
         self._selected_preview_path = None
-        self._all_options = Options(method='texture', profile='balanced', keep_isolated=True,
+        self._all_options = Options(method='texture', profile='balanced', texture_strength=0, keep_isolated=True,
                                     edge_refine=True, stroke_recovery=True, tip_recovery=True)
-        self._draft_options = {}
         self._processing_snapshots = {}
         self._processing_successful = set()
         self._adoption_controls_locked = None
         self._frozen_adoption = {}
-        self._worker_limits = worker_limits()
         self.result_options = self._all_options
         self.worker = None
         self._task_operation = None
         self._platform_services = None
         self._preview_workers = set()
         self._preview_request = 0
+        self._displayed_preview_path = None
+        self._preview_loading = False
         self._closing = False
         self._last_output = None
         self._replacement_report = None
@@ -74,7 +75,6 @@ class MainWindow(QMainWindow):
         self._tuning_timer.setSingleShot(True)
         self._tuning_timer.setInterval(350)
         self._tuning_timer.timeout.connect(self._preview_tuned)
-        self.examples_root = Path(examples_root) if examples_root else PROJECT_ROOT / 'output/client-examples/input'
         self._build_ui()
         if initial_paths:
             QTimer.singleShot(0, lambda: self.import_paths(initial_paths))
@@ -82,127 +82,78 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         split = QSplitter(Qt.Horizontal)
         split.setChildrenCollapsible(False)
+        split.setHandleWidth(6)
         self.sidebar = QWidget()
         side = QVBoxLayout(self.sidebar)
+        side.setContentsMargins(10, 8, 4, 8)
+        side.setSpacing(8)
         sources = QGroupBox('输入图片')
         source_layout = QVBoxLayout(sources)
-        input_buttons = QGridLayout()
+        input_buttons = QVBoxLayout()
+        source_actions = QHBoxLayout()
         self.file_buttons = []
         for index, (title, callback, shortcut) in enumerate((
-            ('添加文件夹…', self.add_folder, 'Ctrl+O'),
-            ('添加图片…', self.add_files, 'Ctrl+Shift+O'),
-            ('加载示例', self.load_examples, None),
+            ('添加图片或文件夹…', self.add_inputs, 'Ctrl+O'),
             ('清空列表', self.clear_inputs, None),
         )):
             button = QPushButton(title)
             button.clicked.connect(callback)
             if shortcut:
                 button.setShortcut(QKeySequence(shortcut))
-            input_buttons.addWidget(button, index // 2, index % 2)
+            if index == 0:
+                button.setObjectName('primaryAction')
+                input_buttons.addWidget(button)
+            else:
+                source_actions.addWidget(button)
             self.file_buttons.append(button)
         source_layout.addLayout(input_buttons)
         self.root_list = QListWidget()
-        self.root_list.setMaximumHeight(95)
+        self.root_list.setTextElideMode(Qt.ElideMiddle)
+        self.root_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.root_list.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        for signal in (self.root_list.model().rowsInserted, self.root_list.model().rowsRemoved,
+                       self.root_list.model().modelReset):
+            signal.connect(self._fit_input_list)
+        self._fit_input_list()
         self.root_list.setToolTip('可添加多个文件夹或直接拖入图片')
         source_layout.addWidget(self.root_list)
-        self.recursive = QCheckBox('包含子文件夹')
-        self.recursive.setChecked(True)
-        self.recursive.toggled.connect(self.rescan)
-        source_layout.addWidget(self.recursive)
         self.scan_button = QPushButton('重新扫描')
         self.scan_button.clicked.connect(self.rescan)
-        source_layout.addWidget(self.scan_button)
-        self.input_count = QLabel('添加图片或加载示例开始')
-        self.input_count.setWordWrap(True)
-        source_layout.addWidget(self.input_count)
+        source_actions.addWidget(self.scan_button)
+        source_layout.addLayout(source_actions)
         side.addWidget(sources)
 
-        self.parameters = QGroupBox('处理设置')
-        form = QFormLayout(self.parameters)
-        self.application_scope = QComboBox()
-        self.application_scope.addItem('当前图片', 'current')
-        self.application_scope.addItem('全部图片', 'all')
-        self.application_scope.setToolTip('当前图片：记住每张图的设置，可自动处理当前图。'
-                                          '全部图片：设置统一参数，点击“批量处理全部”后应用。')
-        form.addRow('应用范围', self.application_scope)
-        strength_row = QWidget()
-        strength_layout = QHBoxLayout(strength_row)
-        strength_layout.setContentsMargins(0, 0, 0, 0)
-        self.strength_slider = QSlider(Qt.Horizontal)
-        self.strength_slider.setRange(0, 1000)
-        self.strength_slider.setSingleStep(10)
-        self.strength_slider.setPageStep(100)
-        self.strength_slider.setToolTip('向左保留更多细节，向右去除更多纹理；0 关闭纹理平滑')
-        self.strength_input = QDoubleSpinBox()
-        self.strength_input.setRange(0, 100)
-        self.strength_input.setDecimals(1)
-        self.strength_input.setSingleStep(1)
-        self.strength_input.setSuffix('%')
-        self.strength_input.setKeyboardTracking(False)
-        self.strength_input.setMinimumWidth(86)
-        strength_layout.addWidget(self.strength_slider, 1)
-        strength_layout.addWidget(self.strength_input)
-        form.addRow('强度', strength_row)
-        self.strength_reset = QPushButton('恢复默认强度')
-        self.strength_reset.clicked.connect(self._reset_strength)
-        form.addRow(self.strength_reset)
-        self.keep_isolated = QCheckBox('保留独立点画')
-        self.keep_isolated.setChecked(True)
-        self.keep_isolated.setToolTip('保留通过宽度和面积筛选、但远离主体的区域；可能留下碎斑。'
-                                     '重新处理时应用此设置，不会补回已被其他筛选删除的笔画。')
-        form.addRow(self.keep_isolated)
-        self.live_preview = QCheckBox('自动处理当前图片')
-        self.live_preview.setToolTip('调节强度或切换“保留独立点画”后，自动处理当前图片；'
-                                     '仅在“当前图片”范围生效。')
-        self.live_preview.setChecked(True)
-        self.live_preview.toggled.connect(self._live_preview_changed)
-        form.addRow(self.live_preview)
-        self.parameter_note = QLabel()
-        self.parameter_note.setWordWrap(True)
-        form.addRow(self.parameter_note)
-        thread_row = QWidget()
-        thread_layout = QHBoxLayout(thread_row)
-        thread_layout.setContentsMargins(0, 0, 0, 0)
-        self.thread_count = QSpinBox()
-        self.thread_count.setRange(1, self._worker_limits.maximum)
-        self.thread_count.setValue(self._worker_limits.recommended)
-        self.thread_count.setMaximumWidth(72)
-        self.thread_hint = QLabel(f'推荐 {self._worker_limits.recommended} · 最大 {self._worker_limits.maximum}')
-        thread_layout.addWidget(self.thread_count)
-        thread_layout.addWidget(self.thread_hint, 1)
-        memory = self._worker_limits.total_memory_bytes
-        memory_note = f'、{memory / (1024 ** 3):g} GiB 内存' if memory is not None else ''
-        thread_row.setToolTip(f'本机 {self._worker_limits.logical_cpus} 个逻辑核心{memory_note}。'
-                              f'当前应用最多支持 {self._worker_limits.maximum} 个计算线程；'
-                              '增加线程会增加内存占用，未必更快。修改线程数会用于下一次处理，保留已有结果。')
-        form.addRow('处理线程', thread_row)
-        side.addWidget(self.parameters)
-
-        self.strength_slider.valueChanged.connect(self._strength_slider_changed)
-        self.strength_input.valueChanged.connect(self._strength_input_changed)
-        self.strength_input.lineEdit().textEdited.connect(self._strength_input_edited)
-        self.strength_input.editingFinished.connect(self._strength_input_finished)
-        self.strength_slider.sliderReleased.connect(self._strength_slider_released)
-        self.keep_isolated.toggled.connect(self._keep_isolated_changed)
-        self.application_scope.currentIndexChanged.connect(self._scope_changed)
-        self._sync_strength()
-
+        process_row = QHBoxLayout()
         self.process_current_button = QPushButton('处理当前图片')
         self.process_current_button.clicked.connect(self.process_current)
-        side.addWidget(self.process_current_button)
+        process_row.addWidget(self.process_current_button)
         self.process_all_button = QPushButton('批量处理全部')
-        self.process_all_button.setStyleSheet('font-weight: 600; padding: 8px;')
         self.process_all_button.clicked.connect(self.process_all)
-        side.addWidget(self.process_all_button)
+        process_row.addWidget(self.process_all_button)
+        side.addLayout(process_row)
 
         self.output_group = QGroupBox('保存结果')
         output_form = QFormLayout(self.output_group)
+        output_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        output_form.setContentsMargins(8, 10, 8, 8)
+        output_form.setHorizontalSpacing(6)
+        self.output_style = QComboBox()
+        for value, title in OUTPUT_STYLES.items():
+            self.output_style.addItem(title, value)
+        self.output_style.setCurrentIndex(self.output_style.findData(DEFAULT_OUTPUT_STYLE))
+        self.output_style.setToolTip('用于全部图片的预览、导出副本和原位置保存；切换后无需重新处理。')
+        self.output_style.currentIndexChanged.connect(self._output_style_changed)
+        self.output_style.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.output_style.setMinimumContentsLength(5)
+        output_form.addRow('底色', self.output_style)
         self.save_mode = QComboBox()
-        self.save_mode.addItem('保存到原位置 · 自动备份', 'replace')
+        self.save_mode.addItem('原位置 · 备份', 'replace')
         self.save_mode.addItem('导出副本', 'export')
         self.save_mode.setToolTip('保存到原位置仅支持 PNG，先备份全部原图；其他格式请选择“导出副本”。')
         self.save_mode.currentIndexChanged.connect(self._save_mode_changed)
-        output_form.addRow('保存方式', self.save_mode)
+        self.save_mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.save_mode.setMinimumContentsLength(8)
+        output_form.addRow('方式', self.save_mode)
         output_row = QWidget()
         line = QHBoxLayout(output_row)
         line.setContentsMargins(0, 0, 0, 0)
@@ -215,10 +166,8 @@ class MainWindow(QMainWindow):
         line.addWidget(choose_output)
         self.output_label = QLabel()
         output_form.addRow(self.output_label, output_row)
-        self.save_note = QLabel()
-        self.save_note.setWordWrap(True)
-        output_form.addRow(self.save_note)
         self.save_button = QPushButton()
+        self.save_button.setObjectName('primaryAction')
         self.save_button.clicked.connect(self.save_results)
         output_form.addRow(self.save_button)
         self._save_mode_changed()
@@ -227,50 +176,119 @@ class MainWindow(QMainWindow):
         self.open_output_button.setToolTip('打开最近一次导出结果或原图备份所在目录。')
         self.open_output_button.clicked.connect(self.open_output)
         side.addWidget(self.open_output_button)
-        note = QLabel('处理结果为候选字形。保存前请检查细笔画、独立点画和残留碎斑。')
-        note.setWordWrap(True)
-        note.setStyleSheet('color: #696969; padding-top: 5px;')
-        side.addWidget(note)
-        side.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(300)
+        scroll.setMinimumWidth(250)
+        scroll.setMaximumWidth(300)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(self.sidebar)
         split.addWidget(scroll)
 
         workspace = QWidget()
         work = QVBoxLayout(workspace)
+        work.setContentsMargins(4, 8, 10, 8)
+        work.setSpacing(6)
         preview_bar = QHBoxLayout()
         self.current_name = QLabel('选择一张图片查看')
         self.current_name.setStyleSheet('font-weight: 600;')
+        self.current_name.setMinimumWidth(0)
+        self.current_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.current_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
         preview_bar.addWidget(self.current_name, 1)
-        self.adopt_current_button = QPushButton('采用当前图片')
-        self.adopt_current_button.clicked.connect(self.toggle_current_adoption)
-        preview_bar.addWidget(self.adopt_current_button)
         self.preview = PreviewPanel()
+        self.preview.output_style_changed.connect(self._preview_style_changed)
         self.preview.selected_pixels.connect(self._selection_changed)
         self.preview.clear_requested.connect(self.clear_selected_component)
+        self.preview.stroke_started.connect(self._discard_pending_preview)
+        self.preview.brush_finished.connect(self.apply_brush_correction)
+        self.preview.brush_foreground_changed.connect(self._sync_brush_controls)
         work.addLayout(preview_bar)
         correction_bar = QHBoxLayout()
-        self.correction_note = QLabel('点击结果中的色块选中，清理多余碎斑')
-        correction_bar.addWidget(self.correction_note, 1)
+        correction_bar.setSpacing(4)
+        self.tool_group = QButtonGroup(self)
+        self.select_tool_button = QPushButton('选中色块')
+        self.brush_tool_button = QPushButton('画笔工具')
+        for button, tool in ((self.select_tool_button, 'select'), (self.brush_tool_button, 'brush')):
+            button.setCheckable(True)
+            self.tool_group.addButton(button)
+            button.clicked.connect(lambda _=False, value=tool: self._set_correction_tool(value))
+            correction_bar.addWidget(button)
+        self.brush_tool_button.setChecked(True)
+        self.brush_options = QWidget()
+        brush_bar = QHBoxLayout(self.brush_options)
+        brush_bar.setContentsMargins(4, 0, 0, 0)
+        brush_bar.setSpacing(4)
+        self.brush_color_group = QButtonGroup(self)
+        self.background_brush_button = QPushButton()
+        self.foreground_brush_button = QPushButton()
+        for button, foreground in ((self.background_brush_button, False),
+                                   (self.foreground_brush_button, True)):
+            button.setCheckable(True)
+            self.brush_color_group.addButton(button)
+            button.clicked.connect(lambda _=False, value=foreground:
+                                   self.preview.mask_canvas.set_brush_foreground(value))
+            brush_bar.addWidget(button)
+        brush_bar.addWidget(QLabel('大小'))
+        size_choices = QWidget()
+        size_bar = QHBoxLayout(size_choices)
+        size_bar.setContentsMargins(0, 0, 0, 0)
+        size_bar.setSpacing(4)
+        size_choices.setStyleSheet(
+            'QToolButton { background: #ffffff; border: 1px solid #b8bec7; border-radius: 4px; padding: 0; }'
+            'QToolButton:hover { background: #edf4ff; }'
+            'QToolButton:checked { background: #dbeafe; border: 2px solid #6c9ddd; }'
+            'QToolButton:disabled { background: #eeeeee; border-color: #d4d4d4; }')
+        self.brush_size_group = QButtonGroup(self)
+        self.brush_size_buttons = {}
+        for size, diameter, name in (
+            (1, 3, '最细'), (3, 5, '细'), (5, 8, '较细'), (9, 11, '中等'),
+            (15, 15, '较粗'), (25, 20, '粗'), (40, 26, '最粗'),
+        ):
+            button = QToolButton()
+            button.setCheckable(True)
+            button.setFixedSize(30, 30)
+            button.setIconSize(QSize(28, 28))
+            button.setToolTip(f'{name}画笔')
+            button.setAccessibleName(f'{name}画笔')
+            dot = QPixmap(56, 56)
+            dot.setDevicePixelRatio(2)
+            dot.fill(Qt.transparent)
+            painter = QPainter(dot)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor('#202020'))
+            painter.drawEllipse(QRectF((28 - diameter) / 2, (28 - diameter) / 2,
+                                      diameter, diameter))
+            painter.end()
+            button.setIcon(QIcon(dot))
+            self.brush_size_group.addButton(button, size)
+            self.brush_size_buttons[size] = button
+            button.setChecked(size == self.preview.mask_canvas.brush_size)
+            size_bar.addWidget(button)
+        self.brush_size_group.idClicked.connect(self.preview.mask_canvas.set_brush_size)
+        brush_bar.addWidget(size_choices)
+        correction_bar.addWidget(self.brush_options)
         self.clear_component_button = QPushButton('清理选中色块')
         self.clear_component_button.clicked.connect(self.clear_selected_component)
         correction_bar.addWidget(self.clear_component_button)
-        self.undo_correction_button = QPushButton('撤销清理')
-        self.undo_correction_button.clicked.connect(self.undo_correction)
-        correction_bar.addWidget(self.undo_correction_button)
+        correction_bar.addStretch()
         work.addLayout(correction_bar)
+        self.correction_note = QLabel()
+        self.correction_note.setWordWrap(True)
+        self.correction_note.setStyleSheet('color: #6b7280; font-size: 11px;')
+        work.addWidget(self.correction_note)
         self.preview.setMinimumHeight(250)
-        body = QSplitter(Qt.Vertical)
+        self.body_splitter = body = QSplitter(Qt.Vertical)
+        body.setHandleWidth(6)
         body.setChildrenCollapsible(False)
         body.addWidget(self.preview)
 
         table_panel = QWidget()
         table_layout = QVBoxLayout(table_panel)
         table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(6)
+        table_panel.setMinimumHeight(140)
         filter_line = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText('筛选文件名或路径…')
@@ -289,6 +307,10 @@ class MainWindow(QMainWindow):
         table_layout.addLayout(filter_line)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(['采用', '图片 / 相对目录', '尺寸', '状态', '复核提示'])
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.setMinimumHeight(92)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -301,16 +323,35 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self.preview_selection)
         self.table.itemChanged.connect(self._table_item_changed)
         table_layout.addWidget(self.table, 1)
-        self.selection_note = QLabel('使用“采用当前图片”或表格勾选决定保存结果；点击中间色块可清理，支持撤销。')
-        self.selection_note.setStyleSheet('color: #696969;')
-        table_layout.addWidget(self.selection_note)
+        self.history_panel = QGroupBox('操作历史')
+        self.history_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        history_layout = QVBoxLayout(self.history_panel)
+        history_actions = QHBoxLayout()
+        self.undo_correction_button = QPushButton('撤销修改')
+        self.undo_correction_button.clicked.connect(self.undo_correction)
+        history_actions.addWidget(self.undo_correction_button)
+        self.redo_correction_button = QPushButton('重做修改')
+        self.redo_correction_button.clicked.connect(self.redo_correction)
+        history_actions.addWidget(self.redo_correction_button)
+        history_layout.addLayout(history_actions)
+        self.history_list = QListWidget()
+        self.history_list.setMinimumHeight(100)
+        self.history_list.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.history_list.setToolTip('点击任一步回到该状态；每张图片保留最近 20 步修改。')
+        self.history_list.setTextElideMode(Qt.ElideRight)
+        self.history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_list.itemClicked.connect(self._history_item_activated)
+        self.history_list.itemActivated.connect(self._history_item_activated)
+        history_layout.addWidget(self.history_list, 1)
+        side.addWidget(self.history_panel, 1)
         body.addWidget(table_panel)
-        body.setStretchFactor(0, 3)
-        body.setStretchFactor(1, 2)
-        body.setSizes([470, 300])
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 0)
+        body.setSizes([600, 180])
         work.addWidget(body, 1)
         footer = QHBoxLayout()
         self.progress = QProgressBar()
+        self.progress.setFixedHeight(18)
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         footer.addWidget(self.progress, 1)
@@ -320,154 +361,87 @@ class MainWindow(QMainWindow):
         work.addLayout(footer)
         split.addWidget(workspace)
         split.setStretchFactor(1, 1)
-        split.setSizes([320, 1080])
+        split.setSizes([250, 1150])
         self.setCentralWidget(split)
         self.status = QLabel('就绪 · 可拖入图片或文件夹')
+        self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.statusBar().addWidget(self.status, 1)
-        self.setStyleSheet('QPushButton:pressed { background: #737373; color: white; }')
+        self.setStyleSheet(
+            'QMainWindow { background: #f5f6f8; }'
+            'QGroupBox { border: 1px solid #d8dde5; border-radius: 6px; margin-top: 8px; padding: 6px; }'
+            'QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; color: #4b5563; }'
+            'QPushButton { min-height: 24px; padding: 2px 8px; border: 1px solid #cdd3dc; border-radius: 4px; background: #ffffff; }'
+            'QPushButton:hover { background: #eef3f9; border-color: #a8b8cf; }'
+            'QPushButton:pressed, QPushButton:checked { background: #e0edff; color: #184d93; border-color: #79a6e3; }'
+            'QPushButton:disabled { color: #9ca3af; background: #f4f5f7; border-color: #e0e3e8; }'
+            'QPushButton#primaryAction:enabled { background: #3478cf; color: white; border-color: #3478cf; }'
+            'QPushButton#primaryAction:enabled:hover { background: #2867b5; }'
+            'QLineEdit, QComboBox { min-height: 24px; }'
+            'QListWidget, QTableWidget { border: 1px solid #d8dde5; border-radius: 3px; background: #ffffff; alternate-background-color: #f7f9fc; }'
+            'QHeaderView::section { background: #eef1f5; color: #4b5563; border: none; border-bottom: 1px solid #d8dde5; padding: 5px; }'
+            'QSplitter::handle { background: #e5e8ed; }')
         self.escape = QShortcut(QKeySequence('Escape'), self)
         self.escape.activated.connect(self.cancel_task)
-        self._sync_scope_parameters()
+        self.history_shortcuts = []
+        bindings = history_key_bindings()
+        self._history_key_sequences = {sequence.toString(QKeySequence.PortableText)
+                                       for sequences in bindings.values() for sequence in sequences}
+        for key, callback in ((QKeySequence.Undo, self.undo_correction),
+                              (QKeySequence.Redo, self.redo_correction)):
+            shortcut = QShortcut(self)
+            shortcut.setKeys(bindings[key])
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(callback)
+            self.history_shortcuts.append((key, shortcut))
+        for editor in self.findChildren(QLineEdit):
+            editor.installEventFilter(self)
+        undo_keys = 'Command+Z' if sys.platform == 'darwin' else 'Ctrl+Z'
+        redo_keys = 'Command+Shift+Z' if sys.platform == 'darwin' else 'Ctrl+Y'
+        self.undo_correction_button.setToolTip('撤销当前图片的上一步修改：' + undo_keys)
+        self.redo_correction_button.setToolTip('恢复刚撤销的修改：' + redo_keys)
+        self._set_correction_tool('brush')
         self._update_buttons()
 
+    def _fit_input_list(self, *_):
+        rows = max(1, min(2, self.root_list.count()))
+        self.root_list.setFixedHeight(rows * (self.fontMetrics().height() + 6) + 6)
+
+    def eventFilter(self, watched, event):
+        if (isinstance(watched, QLineEdit) and event.type() == QEvent.ShortcutOverride
+                and QKeySequence(event.keyCombination()).toString(QKeySequence.PortableText)
+                in self._history_key_sequences):
+            # Reserve these keys for text editing even when its undo stack is empty.
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
     def processing_options(self):
-        return Options(method='texture', profile='balanced', texture_strength=self._texture_strength,
-                       keep_isolated=self.keep_isolated.isChecked(), edge_refine=True,
-                       stroke_recovery=True, tip_recovery=True)
+        return self._all_options
 
     def _platform_allows(self, operation):
         services = self._platform_services
         return services is None or services.permits(operation)
 
-    def _options_for_image(self, path):
-        if path in self._draft_options:
-            return self._draft_options[path]
-        item = self.records.get(path)
-        return (item.options if item is not None and item.options is not None
-                else self._all_options)
-
-    def _sync_scope_parameters(self):
-        self._strength_input_editing = False
-        self._strength_input_cancelled = False
-        source = self.current_source()
-        options = (self._options_for_image(source.path)
-                   if self.application_scope.currentData() == 'current' and source is not None
-                   else self._all_options)
-        self._texture_strength = options.texture_strength
-        with QSignalBlocker(self.keep_isolated):
-            self.keep_isolated.setChecked(options.keep_isolated)
-        self._sync_strength()
-        current_scope = self.application_scope.currentData() == 'current'
-        self.live_preview.setEnabled(current_scope)
-        self.process_all_button.setToolTip(
-            '按各图保存的参数或草稿处理全部图片。' if current_scope else
-            '使用当前统一参数重新处理全部图片。')
-        self._update_parameter_note()
-
-    def _update_parameter_note(self):
-        if self.application_scope.currentData() == 'all':
-            self.parameter_note.setText('批量处理全部将使用这组统一参数。')
-            return
-        source = self.current_source()
-        item = self.records.get(source.path) if source is not None else None
-        if item is None:
-            note = '处理当前图片后应用这些参数。' if source else '这些设置将作为新图片的默认参数。'
-        elif item.options == self.processing_options():
-            note = '当前结果已使用这些参数。'
-        else:
-            note = '参数尚未应用，预览和保存继续使用已有结果。'
-        self.parameter_note.setText(note)
-
-    def _scope_changed(self, *_):
-        self._discard_pending_preview()
-        self._sync_scope_parameters()
-        self.status.setText('可调整当前图片，其他图片保留原结果。'
-                            if self.application_scope.currentData() == 'current' else
-                            '调整统一参数后，点击“批量处理全部”应用。')
-
-    def _sync_strength(self):
-        value = self._texture_strength
-        automatic = value is None
-        if automatic:
-            value = TEXTURE_PROFILES['balanced'][0]
-        percent = round(value * 2000, 1)
-        with QSignalBlocker(self.strength_slider), QSignalBlocker(self.strength_input):
-            self.strength_slider.setValue(round(percent * 10))
-            self.strength_input.setValue(percent)
-        recommended = round(TEXTURE_PROFILES['balanced'][0] * 2000, 1)
-        self.strength_input.setToolTip(
-            f'输入 0–100% 的强度，支持一位小数；默认推荐 {recommended:g}%。'
-            + ('当前使用默认推荐值。' if automatic else '输入后按回车或移开焦点应用。'))
-
-    def _reset_strength(self):
-        self._texture_strength = None
-        self._sync_strength()
-        self.parameters_changed()
-        self._schedule_tuned_preview()
-
-    def _strength_slider_changed(self, value):
-        self._texture_strength = value / 20000
-        self._sync_strength()
-        self.parameters_changed()
-        self._schedule_tuned_preview()
-
-    def _strength_slider_released(self):
-        # Release finishes an existing gesture; it must not recreate a cancelled request.
-        if self._pending_preview_valid():
-            self._pending_preview['ready'] = False
-            self._tuning_timer.start()
-
-    def _strength_input_changed(self, value):
-        self._texture_strength = value / 2000
-        self._sync_strength()
-        self.parameters_changed()
-        self._schedule_tuned_preview()
-
-    def _strength_input_edited(self, *_):
-        self._strength_input_editing = True
-        self._strength_input_cancelled = False
-        self._discard_pending_preview()
-
-    def _strength_input_finished(self):
-        edited = self._strength_input_editing
-        cancelled = self._strength_input_cancelled
-        self._strength_input_editing = False
-        self._strength_input_cancelled = False
-        if edited:
-            if not cancelled:
-                self._schedule_tuned_preview()
-            self.filter_rows(preserve_editor=True)
-
-    def _keep_isolated_changed(self, *_):
-        self.parameters_changed()
-        self._schedule_tuned_preview()
-
     def _schedule_tuned_preview(self):
-        self._discard_pending_preview()
-        if (self.application_scope.currentData() == 'current' and self.current_source() is not None
-                and self.live_preview.isChecked() and not self._closing and not self._tuning_paused
-                and (self.worker is None or self._task_operation == 'process')
-                and not self._strength_input_editing and self._platform_allows('process')):
-            self._pending_preview = {
-                'generation': self._tuning_generation,
-                'path': self.current_source().path,
-                'options': self.processing_options(),
-                'ready': False,
-            }
-            self._tuning_timer.start()
+        source = self.current_source()
+        if (source is None or source.path in self.records or source.path in self.errors
+                or self._closing or self._tuning_paused or not self._platform_allows('process')
+                or (self.worker is not None and self._task_operation not in ('scan', 'process', 'correct'))):
+            return
+        self._pending_preview = {
+            'generation': self._tuning_generation, 'path': source.path,
+            'options': self.processing_options(), 'ready': False,
+        }
+        self._tuning_timer.start()
+        self._update_buttons()
 
     def _preview_tuned(self):
         if not self._pending_preview_valid():
+            self._pending_preview = None
+            self._update_buttons()
             return
-        if self.strength_slider.isSliderDown():
-            self._tuning_timer.start()
-        else:
-            self._pending_preview['ready'] = True
-            self._run_pending_preview()
-
-    def _live_preview_changed(self, checked):
-        if not checked:
-            self._discard_pending_preview()
+        self._pending_preview['ready'] = True
+        self._run_pending_preview()
 
     def _discard_pending_preview(self, cancel_running=True):
         self._tuning_timer.stop()
@@ -477,20 +451,23 @@ class MainWindow(QMainWindow):
         if (cancel_running and self.worker is not None and self._task_operation == 'process'
                 and self.worker.payload.get('automatic')):
             self.worker.requestInterruption()
+        self._update_buttons()
 
     def _pending_preview_valid(self):
         pending = self._pending_preview
         source = self.current_source()
         return (pending is not None and pending['generation'] == self._tuning_generation
                 and source is not None and source.path == pending['path']
-                and self.application_scope.currentData() == 'current'
-                and self.live_preview.isChecked() and not self._closing
-                and not self._tuning_paused and not self._strength_input_editing
+                and source.path not in self.records and source.path not in self.errors
+                and not self._closing and not self._tuning_paused
                 and self._platform_allows('process'))
 
     def _run_pending_preview(self):
-        if (self.worker is not None or not self._pending_preview_valid()
-                or not self._pending_preview['ready'] or self.strength_slider.isSliderDown()):
+        if not self._pending_preview_valid():
+            self._pending_preview = None
+            self._update_buttons()
+            return
+        if self.worker is not None or not self._pending_preview['ready']:
             return
         pending = self._pending_preview
         self._pending_preview = None
@@ -510,15 +487,8 @@ class MainWindow(QMainWindow):
         finally:
             self._tuning_paused -= 1
 
-    def add_folder(self):
-        self._tuning_timer.stop()
-        path = self._show_dialog(QFileDialog.getExistingDirectory, '添加单字图片文件夹')
-        if path:
-            self.import_paths([path])
-
-    def add_files(self):
-        self._tuning_timer.stop()
-        paths, _ = self._show_dialog(QFileDialog.getOpenFileNames, '添加单字图片', '', IMAGE_FILTER)
+    def add_inputs(self):
+        paths = self._show_dialog(ImageInputDialog.choose)
         if paths:
             self.import_paths(paths)
 
@@ -533,18 +503,9 @@ class MainWindow(QMainWindow):
         self.roots = roots
         self.root_list.clear()
         self.root_list.addItems([str(p) for p in roots])
+        for row, path in enumerate(roots):
+            self.root_list.item(row).setToolTip(str(path))
         self.rescan()
-
-    def load_examples(self):
-        self._tuning_timer.stop()
-        if not self.examples_root.is_dir():
-            self._show_dialog(QMessageBox.information, '加载示例', '当前没有可用示例，请选择示例图片文件夹。')
-            self.add_folder()
-            return
-        self.recursive.blockSignals(True)
-        self.recursive.setChecked(True)
-        self.recursive.blockSignals(False)
-        self.import_paths([self.examples_root], append=False)
 
     def clear_inputs(self):
         if self.worker or not self._platform_allows('scan'):
@@ -557,15 +518,15 @@ class MainWindow(QMainWindow):
         self.records.clear()
         self.errors.clear()
         self._correction_history.clear()
-        self._draft_options.clear()
+        self._correction_redo.clear()
         self._selected_preview_path = None
         self.table.setRowCount(0)
         self._cancel_previews()
         self.preview.clear()
+        self._displayed_preview_path = None
+        self._preview_loading = False
         self.current_name.setText('选择一张图片查看')
-        self.input_count.setText('添加图片或加载示例开始')
         self.status.setText('列表已清空')
-        self._sync_scope_parameters()
         self._update_buttons()
 
     def rescan(self):
@@ -576,7 +537,7 @@ class MainWindow(QMainWindow):
             output = Path(self.output.text()).expanduser().resolve()
             if not self._output_contains_input(output):
                 excluded.append(output)
-        self._launch('scan', {'paths': self.roots, 'recursive': self.recursive.isChecked(),
+        self._launch('scan', {'paths': self.roots, 'recursive': True,
                               'exclude_paths': excluded})
 
     def _populate(self, previous=None, selected_path=None):
@@ -602,7 +563,6 @@ class MainWindow(QMainWindow):
                 self.table.item(row, 4).setToolTip(old['note'])
             self._update_adoption_cell(row)
         self.table.blockSignals(False)
-        self.input_count.setText(f'{len(self.inputs)} 张图片 · {len(self.roots)} 个输入路径')
         self.filter_rows()
         if self.inputs:
             selected = self._row_by_path.get(selected_path)
@@ -616,26 +576,14 @@ class MainWindow(QMainWindow):
             self.preview.clear()
             self.current_name.setText('未找到支持的图片')
         self.preview_selection()
-
-    def parameters_changed(self, *_):
-        if (self._closing or not self._platform_allows('process')
-                or (self.worker is not None and self._task_operation != 'process')):
-            return
-        source = self.current_source()
-        options = self.processing_options()
-        if self.application_scope.currentData() == 'current' and source is not None:
-            self._draft_options[source.path] = options
-            self.status.setText('已调整当前图片参数，可处理当前图片应用。')
-        else:
-            self._all_options = options
-            self.status.setText('已调整统一参数，点击“批量处理全部”应用。'
-                                if self.inputs else '已设置新图片的默认参数。')
-        self._update_parameter_note()
+        if self._pending_preview is None:
+            self._schedule_tuned_preview()
 
     def _invalidate_results(self, note):
         self.records.clear()
         self.errors.clear()
         self._correction_history.clear()
+        self._correction_redo.clear()
         with QSignalBlocker(self.table):
             for row in range(self.table.rowCount()):
                 self.table.item(row, 0).setCheckState(Qt.Unchecked)
@@ -656,14 +604,11 @@ class MainWindow(QMainWindow):
             self._start_processing([source], options=self.processing_options())
 
     def process_all(self):
-        per_image = ({source.path: self._options_for_image(source.path) for source in self.inputs}
-                     if self.application_scope.currentData() == 'current' else None)
-        self._start_processing(self.inputs, options=self._all_options, per_image_options=per_image)
+        self._start_processing(self.inputs, options=self.processing_options())
 
     def _row_snapshot(self, path):
         row = self._row_by_path[path]
         return {'record': self.records.get(path),
-                'draft': self._draft_options.get(path),
                 'checked': self.table.item(row, 0).checkState(),
                 'size': self.table.item(row, 2).text(),
                 'state': self.table.item(row, 3).text(),
@@ -704,7 +649,7 @@ class MainWindow(QMainWindow):
             self._set_row(source.path, '处理中', self._processing_snapshots[source.path]['note'])
         cache = self._cache_root / f'run-{datetime.now().strftime("%Y%m%d-%H%M%S-%f")}'
         self._launch('process', {'inputs': list(sources), 'options': self.result_options,
-                                 'cache_dir': cache, 'max_workers': self.thread_count.value(),
+                                 'cache_dir': cache, 'max_workers': 2,
                                  'per_image_options': dict(per_image_options) if per_image_options else None,
                                  'automatic': automatic, 'generation': generation})
 
@@ -722,7 +667,8 @@ class MainWindow(QMainWindow):
         worker.completed.connect(self._task_completed, Qt.QueuedConnection)
         worker.failed.connect(self._task_failed, Qt.QueuedConnection)
         worker.finished.connect(self._task_finished, Qt.QueuedConnection)
-        self.progress.setRange(0, 0)
+        if operation != 'correct':
+            self.progress.setRange(0, 0)
         self.status.setText({'scan': '正在扫描图片…', 'process': '正在处理图片…',
                              'export': '正在导出结果…', 'replace': '正在备份并替换…',
                              'restore': '正在恢复原始图片…', 'correct': '正在保存人工矫正…'}[operation])
@@ -773,9 +719,8 @@ class MainWindow(QMainWindow):
             if checked is not None:
                 self.table.item(row, 0).setCheckState(Qt.Checked if checked else Qt.Unchecked)
             self._update_adoption_cell(row)
-        self._sync_current_adoption()
 
-    def _on_item(self, item):
+    def _on_item(self, item, *, corrected_mask=None):
         path = item.source.path
         previous = self.records.get(path)
         row = self._row_by_path.get(path)
@@ -786,10 +731,8 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self._task_operation == 'process' and path in self._processing_snapshots:
             self._processing_successful.add(path)
             self._correction_history.pop(path, None)
+            self._correction_redo.pop(path, None)
             self.errors.pop(path, None)
-            if (item.options is not None
-                    and self._draft_options.get(path) == self._processing_snapshots[path]['draft']):
-                self._draft_options[path] = item.options
         notes = review_hints(item.metrics, can_undo=bool(self._correction_history.get(item.source.path)))
         item = replace(item, metrics={**item.metrics, 'review_reasons': notes})
         self.records[item.source.path] = item
@@ -798,7 +741,11 @@ class MainWindow(QMainWindow):
                       checked=adopted and item.metrics.get('foreground_pixels', 0) > 0, metrics=item.metrics)
         current = self.current_source()
         if current and current.path == item.source.path:
-            self._refresh_preview()
+            if (corrected_mask is not None and not self._preview_loading
+                    and self._displayed_preview_path == current.path and self.preview.has_image):
+                self.preview.update_mask(corrected_mask)
+            else:
+                self._refresh_preview()
 
     def _on_completed(self, result):
         operation = self._task_operation
@@ -814,10 +761,12 @@ class MainWindow(QMainWindow):
             self.records = {path: replace(item, source=by_path[path]) for path, item in self.records.items()
                             if path in by_path}
             self.errors = {path: error for path, error in self.errors.items() if path in by_path}
-            self._draft_options = {path: options for path, options in self._draft_options.items() if path in by_path}
             self._correction_history = {
                 path: [(replace(item, source=by_path[path]), adopted) for item, adopted in history]
                 for path, history in self._correction_history.items() if path in by_path}
+            self._correction_redo = {
+                path: [(replace(item, source=by_path[path]), adopted) for item, adopted in future]
+                for path, future in self._correction_redo.items() if path in by_path}
             self.inputs = result
             self._populate(previous, selected_path)
             self.status.setText(f'扫描完成：{len(result)} 张图片')
@@ -840,10 +789,14 @@ class MainWindow(QMainWindow):
             history = self._correction_history.setdefault(previous.source.path, [])
             history.append((previous, self.worker.payload['adopted']))
             del history[:-20]
-            self._on_item(result)
+            self._correction_redo.pop(previous.source.path, None)
+            result = replace(result, metrics={**result.metrics,
+                                             'correction_operation': self.worker.payload.get('action', 'select')})
+            self._on_item(result, corrected_mask=self.worker.payload['mask'])
             notes = self.records[result.source.path].metrics['review_reasons']
             self._set_row(result.source.path, '已矫正', '；'.join(notes))
-            self.status.setText('已清理选中色块，保存时应用当前矫正结果')
+            action = '已完成画笔精修' if self.worker.payload.get('tool') == 'brush' else '已清理选中色块'
+            self.status.setText(action + '，保存时应用当前矫正结果')
         elif isinstance(result, SaveSummary):
             if self._platform_services is not None:
                 self._platform_services.on_saved(result)
@@ -877,6 +830,7 @@ class MainWindow(QMainWindow):
             self.filter_rows(preserve_editor=True)
             self._refresh_preview()
         elif self._task_operation == 'correct':
+            self.preview.mask_canvas.discard_pending_mask()
             self._refresh_preview()
         self.status.setText('失败：' + message)
         if not self._closing:
@@ -904,7 +858,6 @@ class MainWindow(QMainWindow):
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
         self._update_buttons()
-        self._update_parameter_note()
         if obsolete and not self._closing and self._pending_preview is None:
             self.status.setText('已取消处理，保留已有结果。' if worker.payload.get('cancelled_by_user')
                                 else '已结束上一轮自动处理，保留已有结果。')
@@ -916,8 +869,6 @@ class MainWindow(QMainWindow):
 
     def cancel_task(self):
         self._discard_pending_preview(cancel_running=False)
-        if self._strength_input_editing:
-            self._strength_input_cancelled = True
         self.preview.clear_selection()
         if self.worker and self._task_operation != 'restore':
             self.worker.payload['cancelled_by_user'] = True
@@ -933,22 +884,30 @@ class MainWindow(QMainWindow):
     def preview_selection(self):
         source = self.current_source()
         path = source.path if source is not None else None
-        if path != self._selected_preview_path:
+        changed = path != self._selected_preview_path
+        if changed:
             self._selected_preview_path = path
             self._discard_pending_preview()
-            self._sync_scope_parameters()
         self._refresh_preview()
+        if changed:
+            self._schedule_tuned_preview()
 
     def _refresh_preview(self):
         source = self.current_source()
-        self._update_parameter_note()
         self._cancel_previews()
         if source is None or self._closing:
             self.preview.clear()
+            self._displayed_preview_path = None
+            self._preview_loading = False
             return
         self.current_name.setText(source.relative_path.as_posix())
         self.current_name.setToolTip(str(source.path))
-        self.preview.clear()
+        # Retain the current image while a same-image revision loads. Actual
+        # image switches clear immediately so pixels cannot acquire a new owner.
+        if source.path != self._displayed_preview_path:
+            self.preview.clear()
+            self._displayed_preview_path = None
+        self._preview_loading = True
         request = self._preview_request
         item = self.records.get(source.path)
         foreground = (item.options.foreground if item is not None and item.options is not None
@@ -969,6 +928,10 @@ class MainWindow(QMainWindow):
             self.preview.set_images(result.original, result.mask, result.candidate)
         else:
             self.preview.set_images(result, None, None)
+        source = self.current_source()
+        self._displayed_preview_path = source.path if source else None
+        self._preview_loading = False
+        self._update_buttons()
 
     @Slot(int, str)
     def _preview_failed(self, request, message):
@@ -977,11 +940,14 @@ class MainWindow(QMainWindow):
             if source:
                 self.records.pop(source.path, None)
                 self._correction_history.pop(source.path, None)
+                self._correction_redo.pop(source.path, None)
                 self.errors[source.path] = message
                 self._set_row(source.path, '失败', message, checked=False)
+            self.preview.clear()
+            self._displayed_preview_path = None
+            self._preview_loading = False
             self.status.setText('预览失败：' + message)
             self._update_buttons()
-            self._update_parameter_note()
 
     @Slot()
     def _preview_task_finished(self):
@@ -994,39 +960,146 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
         self._finish_close()
 
+    def _set_correction_tool(self, tool):
+        self.preview.mask_canvas.set_tool(tool)
+        self.select_tool_button.setChecked(tool == 'select')
+        self.brush_tool_button.setChecked(tool == 'brush')
+        self.brush_options.setVisible(tool == 'brush')
+        self.clear_component_button.setVisible(tool == 'select')
+        self._sync_brush_controls()
+        self._selection_changed(self.preview.selection_count)
+
+    def _sync_brush_controls(self, *_):
+        canvas = self.preview.mask_canvas
+        for button, foreground in ((self.background_brush_button, False),
+                                   (self.foreground_brush_button, True)):
+            white = foreground != canvas.inverted
+            color = '白色' if white else '黑色'
+            action = '填补' if foreground else '分割'
+            swatch = QPixmap(14, 14)
+            swatch.fill(QColor('white' if white else 'black'))
+            painter = QPainter(swatch)
+            painter.setPen(QColor('#9ca3af'))
+            painter.drawRect(0, 0, 13, 13)
+            painter.end()
+            button.setIcon(QIcon(swatch))
+            button.setText(action)
+            button.setAccessibleName(f'{color} · {action}')
+            button.setChecked(canvas.brush_foreground == foreground)
+            help_text = ('填补缺失笔画' if foreground else '用背景色画线，分离粘连色块')
+            button.setToolTip(f'{color} · {action}：{help_text}；在画布按 X 切换双色')
+
     def _selection_changed(self, pixels):
-        self.correction_note.setText(f'已选中 {pixels} 个像素 · 退格或 Delete 清理' if pixels else
-                                     '点击结果中的色块选中，清理多余碎斑')
+        if self.preview.mask_canvas.tool == 'brush':
+            self.correction_note.setText('拖动精修 · X 切换双色 · Esc 取消当前一笔')
+        else:
+            self.correction_note.setText(f'已选中 {pixels} 个像素 · 退格或 Delete 清理' if pixels else
+                                         '点击选块 · Ctrl/Command 多选 · Delete 清理')
         self._update_buttons()
 
     def clear_selected_component(self):
-        source = self.current_source()
-        if (self.worker or self._closing or not self._platform_allows('correct')
-                or source is None or source.path not in self.records):
+        if self.preview.mask_canvas.tool != 'select':
             return
         mask = self.preview.remove_selected()
-        if mask is None:
+        if mask is not None:
+            self._apply_manual_correction(mask, 'select')
+
+    def apply_brush_correction(self, mask):
+        self._apply_manual_correction(mask, 'brush')
+
+    def _apply_manual_correction(self, mask, tool):
+        source = self.current_source()
+        if (self.worker or self._closing or not self._platform_allows('correct')
+                or self._preview_loading or source is None or source.path not in self.records):
+            self.preview.mask_canvas.discard_pending_mask()
             return
+        action = ('brush_fill' if self.preview.mask_canvas.brush_foreground else 'brush_cut') if tool == 'brush' else 'select'
+        self.preview.mask_canvas.show_pending_mask(mask)
         self._launch('correct', {'item': self.records[source.path], 'mask': mask,
+                                'tool': tool, 'action': action,
                                 'cache_dir': self._cache_root / 'corrections',
                                 'adopted': self.table.item(self.table.currentRow(), 0).checkState() == Qt.Checked})
 
     def undo_correction(self):
         source = self.current_source()
+        if source is not None:
+            self._restore_history_step(len(self._correction_history.get(source.path, [])) - 1)
+
+    def redo_correction(self):
+        source = self.current_source()
+        if source is not None:
+            self._restore_history_step(len(self._correction_history.get(source.path, [])) + 1)
+
+    def _history_item_activated(self, item):
+        self._restore_history_step(self.history_list.row(item))
+
+    def _history_states(self, source):
+        if source is None or source.path not in self.records:
+            return [], 0
+        past = self._correction_history.get(source.path, [])
+        future = self._correction_redo.get(source.path, [])
+        adopted = self.table.item(self._row_by_path[source.path], 0).checkState() == Qt.Checked
+        return [*past, (self.records[source.path], adopted), *reversed(future)], len(past)
+
+    def _restore_history_step(self, step):
+        source = self.current_source()
         if self.worker or self._closing or source is None or not self._platform_allows('correct'):
             return
-        history = self._correction_history.get(source.path, [])
-        if not history:
+        states, current = self._history_states(source)
+        if not 0 <= step < len(states) or step == current:
             return
         self._discard_pending_preview()
-        previous, adopted = history.pop()
+        self.preview.mask_canvas.cancel_stroke()
+        self._correction_history[source.path] = states[:step]
+        self._correction_redo[source.path] = list(reversed(states[step + 1:]))
+        previous, adopted = states[step]
         self._on_item(previous)
         notes = self.records[source.path].metrics['review_reasons']
         state = '已矫正' if previous.metrics.get('manual_correction') else (
             '待复核' if notes else '已处理')
         self._set_row(source.path, state, '；'.join(notes), checked=adopted and self._can_adopt(source.path))
-        self.status.setText('已撤销当前图片的上一步清理')
+        self.status.setText('已回到：' + self._history_label(previous))
         self._update_buttons()
+
+    @staticmethod
+    def _history_label(item):
+        step = item.metrics.get('correction_steps', 0)
+        if not step:
+            return '初始处理结果'
+        action = CORRECTION_NAMES.get(item.metrics.get('correction_operation'), '人工修改')
+        return f'{step} · {action}'
+
+    def _sync_history_panel(self, editable):
+        source = self.current_source()
+        states, current = self._history_states(source)
+        key = (source.path if source else None, tuple(id(item) for item, _ in states), current)
+        if key != self._history_view_key:
+            self._history_view_key = key
+            with QSignalBlocker(self.history_list):
+                self.history_list.clear()
+                for index, (record, _) in enumerate(states):
+                    text = self._history_label(record)
+                    if index == current:
+                        text += '  ← 当前'
+                    item = QListWidgetItem(text)
+                    if index > current:
+                        item.setForeground(QColor('#808080'))
+                    if record.metrics.get('manual_correction'):
+                        item.setToolTip(f'删除 {record.metrics.get("correction_removed_pixels", 0)} 个像素，'
+                                        f'填补 {record.metrics.get("correction_added_pixels", 0)} 个像素；点击恢复此状态')
+                    self.history_list.addItem(item)
+                if states:
+                    self.history_list.setCurrentRow(current)
+                    self.history_list.scrollToItem(self.history_list.item(current))
+                else:
+                    self.history_list.addItem('处理图片后在这里查看修改记录')
+        self.history_list.setEnabled(editable and bool(states))
+        undo = editable and current > 0
+        redo = editable and current + 1 < len(states)
+        self.undo_correction_button.setEnabled(undo)
+        self.redo_correction_button.setEnabled(redo)
+        for key, shortcut in self.history_shortcuts:
+            shortcut.setEnabled(undo if key == QKeySequence.Undo else redo)
 
     def filter_rows(self, *_, preserve_editor=False):
         search = self.search.text().strip().casefold()
@@ -1034,7 +1107,7 @@ class MainWindow(QMainWindow):
         source = self.current_source()
         # Internal result updates must not switch the owner of an edit or queued request.
         held_path = (source.path if preserve_editor and source is not None
-                     and (self._strength_input_editing or self._pending_preview_valid()) else None)
+                     and self._pending_preview_valid() else None)
         for row, source in enumerate(self.inputs):
             state = self.table.item(row, 3).text()
             matches = (not search or search in str(source.path).casefold())
@@ -1071,19 +1144,6 @@ class MainWindow(QMainWindow):
             flags |= Qt.ItemIsEnabled
         check.setFlags(flags)
 
-    def _sync_current_adoption(self):
-        source = self.current_source()
-        checked = (source is not None
-                   and self.table.item(self.table.currentRow(), 0).checkState() == Qt.Checked)
-        self.adopt_current_button.setText('取消采用当前图片' if checked else '采用当前图片')
-        self.adopt_current_button.setEnabled(
-            not self._adoption_locked() and source is not None
-            and (checked or self._can_adopt(source.path)))
-        self.adopt_current_button.setToolTip(
-            '当前图片已采用，保存时将输出；点击取消采用。' if checked else
-            '采用当前图片，保存时输出这个结果。' if source and self._can_adopt(source.path) else
-            '请先处理图片；只有非空结果可以采用。')
-
     def _remember_correction_adoption(self, path, checked):
         if (self.worker is not None and self._task_operation == 'correct'
                 and self.worker.payload['item'].source.path == path):
@@ -1104,15 +1164,6 @@ class MainWindow(QMainWindow):
                 with QSignalBlocker(self.table):
                     self._update_adoption_cell(item.row())
         self._update_buttons()
-
-    def toggle_current_adoption(self):
-        source = self.current_source()
-        if self._adoption_locked() or source is None or not self._platform_allows('correct'):
-            return
-        check = self.table.item(self.table.currentRow(), 0)
-        checked = check.checkState() == Qt.Checked
-        if checked or self._can_adopt(source.path):
-            check.setCheckState(Qt.Unchecked if checked else Qt.Checked)
 
     def check_all(self, checked):
         if self._adoption_locked() or not self._platform_allows('correct'):
@@ -1140,8 +1191,13 @@ class MainWindow(QMainWindow):
         replace = self.save_mode.currentData() == 'replace'
         self.output_label.setText('备份目录' if replace else '保存目录')
         self.save_button.setText('保存到原位置' if replace else '导出采用项')
-        self.save_note.setText('将采用的 PNG 保存到原文件路径，保持原图尺寸；先备份全部原图。' if replace else
-                               '按输入目录结构导出 PNG，保持原图尺寸。')
+
+    def _output_style_changed(self):
+        self.preview.set_output_style(self.output_style.currentData())
+
+    def _preview_style_changed(self, output_style):
+        self.output_style.setCurrentIndex(self.output_style.findData(output_style))
+        self._sync_brush_controls()
 
     def _output_contains_input(self, output):
         paths = self.roots or [source.path for source in self.inputs]
@@ -1167,12 +1223,13 @@ class MainWindow(QMainWindow):
             raise ValueError('保存方式必须为导出或替换')
         if not self._platform_allows(mode):
             return False
+        output_style = self.output_style.currentData()
         if mode == 'replace':
             if any(item.source.path.suffix.lower() != '.png' for item in items):
                 self._show_dialog(QMessageBox.warning, '保存到原位置', '保存到原位置仅支持 PNG；其他格式请选择“导出副本”。')
                 return False
             answer = self._show_dialog(QMessageBox.question, '保存到原位置',
-                f'将先备份全部 {len(items)} 张原图，再将采用项的黑底白字结果保存到原文件路径。\n'
+                f'将先备份全部 {len(items)} 张原图，再将采用项的{OUTPUT_STYLES[output_style]}结果保存到原文件路径。\n'
                 '图片尺寸保持不变。是否继续？',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
@@ -1180,7 +1237,7 @@ class MainWindow(QMainWindow):
         directory = output / (
             ('备份-' if mode == 'replace' else '结果-') + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
         batch = BatchResult(self.result_options, items)
-        self._launch(mode, {'batch': batch, 'directory': directory})
+        self._launch(mode, {'batch': batch, 'directory': directory, 'output_style': output_style})
         return self.worker is not None
 
     def choose_restore(self):
@@ -1212,13 +1269,13 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'save_button'):
             return
         busy = self.worker is not None or self._closing
-        processing = self.worker is not None and self._task_operation == 'process'
-        editable_settings = not self._closing and (self.worker is None or processing)
+        correcting = self.worker is not None and self._task_operation == 'correct' and not self._closing
+        editing_task = self.worker is not None and self._task_operation in ('process', 'correct')
+        editable_settings = not self._closing and (self.worker is None or editing_task)
         for button in self.file_buttons:
             button.setEnabled(not busy)
-        for widget in (self.root_list, self.recursive, self.scan_button):
+        for widget in (self.root_list, self.scan_button):
             widget.setEnabled(not busy)
-        self.parameters.setEnabled(editable_settings)
         self.output_group.setEnabled(editable_settings)
         self.process_all_button.setEnabled(not busy and bool(self.inputs))
         self.process_current_button.setEnabled(not busy and self.current_source() is not None)
@@ -1226,6 +1283,7 @@ class MainWindow(QMainWindow):
         self.save_button.setEnabled(not busy and count > 0)
         self.open_output_button.setEnabled(not self._closing and self._last_output is not None)
         adoption_locked = self._adoption_locked()
+        self.preview.output_style_editable = not adoption_locked
         if adoption_locked != self._adoption_controls_locked:
             self._adoption_controls_locked = adoption_locked
             self._frozen_adoption = ({source.path: self.table.item(row, 0).checkState()
@@ -1235,14 +1293,23 @@ class MainWindow(QMainWindow):
                     self._update_adoption_cell(row)
         for button in self.adoption_buttons:
             button.setEnabled(not adoption_locked and bool(self.inputs))
-        self._sync_current_adoption()
-        self.cancel_button.setEnabled(self.worker is not None and not self._closing
-                                      and self._task_operation != 'restore'
-                                      and not self.worker.payload.get('cancelled_by_user'))
+        can_cancel_worker = (self.worker is not None
+                             and self._task_operation not in ('restore', 'correct')
+                             and not self.worker.payload.get('cancelled_by_user'))
+        can_cancel_pending = self.worker is None and self._pending_preview_valid()
+        self.cancel_button.setEnabled(not self._closing and (can_cancel_worker or can_cancel_pending))
         source = self.current_source()
-        editable = not busy and source is not None and source.path in self.records
-        self.clear_component_button.setEnabled(editable and self.preview.selection_count > 0)
-        self.undo_correction_button.setEnabled(editable and bool(self._correction_history.get(source.path)))
+        editable = (not busy and source is not None and source.path in self.records
+                    and self._platform_allows('correct'))
+        canvas_editable = editable and not self._preview_loading
+        self.preview.mask_canvas.set_editable(canvas_editable)
+        self.select_tool_button.setEnabled(not busy or correcting)
+        self.brush_tool_button.setEnabled(not busy or correcting)
+        self.brush_options.setEnabled((canvas_editable or (correcting and not self._preview_loading))
+                                     and not self.preview.mask_canvas.image.isNull())
+        self.clear_component_button.setEnabled(canvas_editable and self.preview.mask_canvas.tool == 'select'
+                                               and self.preview.selection_count > 0)
+        self._sync_history_panel(editable)
 
     def dragEnterEvent(self, event):
         if not self.worker and event.mimeData().hasUrls():
@@ -1288,11 +1355,19 @@ def main(argv=None):
     app.setApplicationName(APP_NAME)
     app.setOrganizationName('HanZi')
     app.setStyle('Fusion')
-    from .platform_integration import start_platform_session, attach_platform_services
-    session = start_platform_session(app)
-    if session is None:
-        return 0
+    # Local source runs may opt out of account services for development.
+    # Frozen release builds always require the normal authenticated flow.
+    local_dev = (os.environ.get('HANZI_MASK_LOCAL_DEV') == '1'
+                 and not getattr(sys, 'frozen', False))
+    if local_dev:
+        session = None
+    else:
+        from .platform_integration import start_platform_session, attach_platform_services
+        session = start_platform_session(app)
+        if session is None:
+            return 0
     window = MainWindow(initial_paths=paths)
-    attach_platform_services(window, session)
+    if not local_dev:
+        attach_platform_services(window, session)
     window.show()
     return app.exec()

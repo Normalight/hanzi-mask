@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip('PySide6')
 from PySide6.QtCore import QCoreApplication, QEvent, QObject
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QLabel, QMainWindow, QMessageBox, QWidget
+from PySide6.QtWidgets import QComboBox, QLabel, QMainWindow, QMessageBox, QWidget
 
 from hanzi_mask.batch_service import ProcessingError, SaveSummary
 from ui.platform_integration import (
@@ -98,6 +98,9 @@ class FakeWindow(QMainWindow):
         self.discard_modes = []
         self.save_modes = []
         self.save_mode = 'replace'
+        self.output_style = QComboBox(self)
+        self.output_style.addItem('白底黑字', 'black-on-white')
+        self.output_style.addItem('黑底白字', 'white-on-black')
         self.fail_save_start = False
         self.close_calls = 0
         self.cleanup_calls = 0
@@ -473,13 +476,17 @@ def test_update_no_adopted_items_preserves_cache_during_probe(bridge):
     assert window.cache_file.is_file()
 
 
-def test_changed_selection_requires_new_update_export(bridge, qapp):
+@pytest.mark.parametrize('change', ['selection', 'output_style'])
+def test_changed_save_settings_require_new_update_export(bridge, qapp, change):
     window, services = bridge
     request_update(services)
     services.before_close(QCloseEvent())
     services.on_saved(summary(window))
     window.worker = None
-    window.items.append(object())
+    if change == 'selection':
+        window.items.append(object())
+    else:
+        window.output_style.setCurrentIndex(1)
     services.on_task_finished('export')
     wait_for(qapp, lambda: len(window.save_modes) == 2)
     assert window.isVisible()
@@ -562,13 +569,30 @@ assert not any(name.split('.')[0] == 'hanzi_update' for name in sys.modules)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_explicit_local_development_mode_opens_gui_without_shared_services(tmp_path):
+    script = """
+import sys
+from PySide6.QtWidgets import QApplication
+QApplication.exec = lambda self: 0
+from ui.window import main
+assert main([]) == 0
+windows = [w for w in QApplication.topLevelWidgets() if w.__class__.__name__ == 'MainWindow']
+assert len(windows) == 1 and windows[0].isVisible()
+assert windows[0]._platform_services is None
+"""
+    project = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, HANZI_MASK_LOCAL_DEV='1', QT_QPA_PLATFORM='offscreen')
+    result = subprocess.run([sys.executable, '-c', script], cwd=project, env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_real_window_lock_gates_work_but_preserves_explicit_and_clicked_export(
         window, qapp, tmp_path):
     assert window.save_mode.currentData() == 'replace'
     path = write_two_components(tmp_path / 'input' / 'glyph.png')
     originals = path.read_bytes()
     import_and_process(window, qapp, path)
-    window.live_preview.setChecked(False)
     click_mask_pixel(window, qapp)
     window.clear_component_button.click()
     wait_for(qapp, lambda: idle(window))
@@ -585,7 +609,7 @@ def test_real_window_lock_gates_work_but_preserves_explicit_and_clicked_export(
     window.process_all()
     window._launch('process', {})
     window._launch('correct', {})
-    click_mask_pixel(window, qapp, x=22, y=60)
+    click_mask_pixel(window, qapp, x=22, y=60, editable=False)
     window.clear_selected_component()
     window.undo_correction()
     assert window.worker is None
@@ -650,8 +674,9 @@ def test_real_lock_rescue_forces_copy_export_when_default_saves_in_place(
 @pytest.mark.parametrize('has_pending', [False, True])
 def test_refused_update_keeps_real_automatic_generation_and_queued_latest_work(
         window, qapp, tmp_path, monkeypatch, has_pending):
-    path = write_two_components(tmp_path / 'input' / 'glyph.png')
-    import_and_process(window, qapp, path)
+    path = write_two_components(tmp_path / 'input' / 'a.png')
+    second = write_two_components(tmp_path / 'input' / 'b.png')
+    import_and_process(window, qapp, path.parent)
     services = PlatformServices(window)
     services.guard = FakeGuard()
     services.updater = FakeUpdater(window)
@@ -660,12 +685,13 @@ def test_refused_update_keeps_real_automatic_generation_and_queued_latest_work(
     runner = ControlledProcessing(window.records, count=2 if has_pending else 1)
     monkeypatch.setattr(worker_module, 'process_batch', runner)
     try:
-        window.strength_slider.setValue(600)
+        window.records.clear()
+        window._schedule_tuned_preview()
         expire_tuning(window)
         wait_for(qapp, lambda: runner.entered[0].is_set())
         running = window.worker
         if has_pending:
-            window.strength_slider.setValue(720)
+            window.table.setCurrentCell(1, 1)
             expire_tuning(window)
         pending = window._pending_preview
         generation = window._tuning_generation
@@ -681,10 +707,10 @@ def test_refused_update_keeps_real_automatic_generation_and_queued_latest_work(
         runner.release[0].set()
         if has_pending:
             wait_for(qapp, lambda: runner.entered[1].is_set())
-            assert runner.calls[1][1].texture_strength == .036
+            assert runner.calls[1][0][0].path == second
             runner.release[1].set()
         wait_for(qapp, lambda: idle(window))
-        assert window.records[path].options.texture_strength == (.036 if has_pending else .03)
+        assert window.records[second if has_pending else path].options.texture_strength == 0
         assert len(runner.calls) == (2 if has_pending else 1)
     finally:
         runner.release_all()

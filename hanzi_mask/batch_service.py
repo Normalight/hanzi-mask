@@ -23,6 +23,7 @@ from PIL import Image
 
 from . import __version__
 from .concurrency import MAX_WORKERS, worker_limits
+from .output_style import DEFAULT_OUTPUT_STYLE, render_mask, validate_output_style
 from .processing import Options, Result, load_image, process_image
 
 SUPPORTED = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
@@ -265,7 +266,7 @@ def process_batch(inputs: Iterable[InputImage], options: Options,
     thread. Cancellation waits for the current native solves to finish without
     publishing their late results. In-memory batches stay sequential by default.
     An explicit max_workers (1 to MAX_WORKERS) permits controlled comparisons;
-    the desktop further limits selectable values using worker_limits().
+    the desktop requests two workers with its fixed processing defaults.
     per_image_options overrides only selected source paths. Each completed item
     records its actual parameters; batch.options remains the default context.
     """
@@ -416,8 +417,8 @@ def _png_bytes(mask: np.ndarray) -> bytes:
     return buffer.getvalue()
 
 
-def _mask_bytes(item: ProcessedImage) -> bytes:
-    return _png_bytes(load_mask(item))
+def _mask_bytes(item: ProcessedImage, output_style: str) -> bytes:
+    return _png_bytes(render_mask(load_mask(item), output_style))
 
 
 def _cache_item(item: ProcessedImage, cache: Path, index: int) -> ProcessedImage:
@@ -425,7 +426,7 @@ def _cache_item(item: ProcessedImage, cache: Path, index: int) -> ProcessedImage
     directory = cache / f"{index:06d}-{token}"
     directory.mkdir(exist_ok=False)
     mask_path, candidate_path = directory / "mask.png", directory / "candidate.png"
-    _atomic_write(mask_path, _mask_bytes(item), exclusive=True)
+    _atomic_write(mask_path, _png_bytes(load_mask(item)), exclusive=True)
     _atomic_write(candidate_path, _png_bytes(item.result.candidate), exclusive=True)
     metrics = dict(item.metrics or (item.result.metrics if item.result is not None else {}))
     metrics["parameters"] = _item_parameters(item)
@@ -474,7 +475,7 @@ def _item_parameters(item: ProcessedImage) -> dict | None:
     return dict(parameters) if isinstance(parameters, dict) else None
 
 
-def _base_report(batch: BatchResult, operation: str) -> dict:
+def _base_report(batch: BatchResult, operation: str, output_style: str) -> dict:
     parameters = [_item_parameters(item) for item in batch.items]
     uniform = bool(parameters) and parameters[0] is not None and all(
         value == parameters[0] for value in parameters[1:]
@@ -483,6 +484,7 @@ def _base_report(batch: BatchResult, operation: str) -> dict:
         "schema_version": 2,
         "tool_version": __version__,
         "operation": operation,
+        "output_style": output_style,
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "parameter_mode": "uniform" if uniform else "per_image",
         "parameters": parameters[0] if uniform else None,
@@ -515,19 +517,21 @@ def _validate_items(batch: BatchResult) -> None:
 
 
 def export_batch(batch: BatchResult, output_dir: Path | str,
-                 cancel: Cancel | None = None, progress: Progress | None = None) -> SaveSummary:
+                 cancel: Cancel | None = None, progress: Progress | None = None,
+                 *, output_style: str = DEFAULT_OUTPUT_STYLE) -> SaveSummary:
     """Export original-size binary PNGs and a JSON report in a new directory.
 
     Cancellation leaves completed exports and reports the partial run. Originals
     are never written. Errors are recorded per image so good results remain usable.
     """
     _validate_items(batch)
+    validate_output_style(output_style)
     requested = Path(output_dir).expanduser().resolve()
     if any(item.source.path.is_relative_to(requested) for item in batch.items):
         raise ValueError("输出目录不能是原图所在目录或其上级目录")
     directory = _new_directory(requested)
     summary = SaveSummary(directory, directory / "report.json")
-    report = _base_report(batch, "export")
+    report = _base_report(batch, "export", output_style)
     try:
         for index, item in enumerate(batch.items, 1):
             _cancel(cancel)
@@ -536,7 +540,7 @@ def export_batch(batch: BatchResult, output_dir: Path | str,
                       "output": relative.as_posix(), "parameters": _item_parameters(item),
                       "metrics": item.metrics}
             try:
-                data = _mask_bytes(item)
+                data = _mask_bytes(item, output_style)
                 target = directory / relative
                 if not target.parent.resolve().is_relative_to(directory):
                     raise ValueError("输出子目录越过运行目录")
@@ -589,7 +593,8 @@ def _rollback(entries: list[dict], directory: Path) -> list[str]:
 
 
 def replace_originals(batch: BatchResult, backup_dir: Path | str,
-                      cancel: Cancel | None = None, progress: Progress | None = None) -> SaveSummary:
+                      cancel: Cancel | None = None, progress: Progress | None = None,
+                      *, output_style: str = DEFAULT_OUTPUT_STYLE) -> SaveSummary:
     """Replace PNG originals, with full backups and rollback on cancellation/error.
 
     A fresh backup directory and report remain after every started operation.
@@ -597,6 +602,7 @@ def replace_originals(batch: BatchResult, backup_dir: Path | str,
     rejected, avoiding lossy or incorrectly named JPEG replacements.
     """
     _validate_items(batch)
+    validate_output_style(output_style)
     if batch.cancelled or batch.errors:
         raise ValueError("处理未完整完成，请先处理成功并选择要替换的图片")
     requested = Path(backup_dir).expanduser().resolve()
@@ -611,10 +617,10 @@ def replace_originals(batch: BatchResult, backup_dir: Path | str,
         with Image.open(item.source.path) as image:
             if item.source.path.suffix.lower() != ".png" or image.format != "PNG":
                 raise ValueError(f"原位替换仅支持 PNG；其他格式请导出到新目录：{item.source.path.name}")
-        _mask_bytes(item)
+        _mask_bytes(item, output_style)
     directory = _new_directory(requested)
     summary = SaveSummary(directory, directory / "replacement.json")
-    report = _base_report(batch, "replace")
+    report = _base_report(batch, "replace", output_style)
     report["status"] = "backing_up"
     _report(summary.report_path, report)
     try:
@@ -629,7 +635,7 @@ def replace_originals(batch: BatchResult, backup_dir: Path | str,
                 raise ValueError(f"备份过程中原图发生变化：{item.source.path}")
             relative = Path("originals") / f"{index:06d}.png"
             _atomic_write(directory / relative, data, exclusive=True)
-            output = _mask_bytes(item)
+            output = _mask_bytes(item, output_style)
             report["images"].append({"source": str(item.source.path), "backup": relative.as_posix(),
                                       "source_sha256": item.source_sha256,
                                       "output_sha256": sha256(output).hexdigest(),
@@ -640,7 +646,7 @@ def replace_originals(batch: BatchResult, backup_dir: Path | str,
         for index, (item, entry) in enumerate(zip(batch.items, report["images"]), 1):
             _cancel(cancel)
             _check_source(item)
-            data = _mask_bytes(item)
+            data = _mask_bytes(item, output_style)
             if sha256(data).hexdigest() != entry["output_sha256"]:
                 raise ValueError("处理结果在保存过程中发生变化")
             _cancel(cancel)

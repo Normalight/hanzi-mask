@@ -54,6 +54,7 @@ class PlatformServices(QObject):
         self._update_worker = None
         self._update_save_ready = False
         self._update_saved_items = ()
+        self._update_saved_style = None
         self._update_close_pending = False
 
     def _locked(self):
@@ -73,6 +74,7 @@ class PlatformServices(QObject):
         self._update_worker = None
         self._update_save_ready = False
         self._update_saved_items = ()
+        self._update_saved_style = None
         self._update_close_pending = False
         if message:
             self.window.status.setText(message)
@@ -154,6 +156,7 @@ class PlatformServices(QObject):
     def _saved_selection_is_current(self):
         current = self.window.adopted_items()
         return (len(current) == len(self._update_saved_items)
+                and self.window.output_style.currentData() == self._update_saved_style
                 and all(item is saved for item, saved in zip(current, self._update_saved_items)))
 
     def _allow_close(self, event, updater):
@@ -196,6 +199,7 @@ class PlatformServices(QObject):
         adopted = tuple(self.window.adopted_items())
         self._update_save_ready = False
         self._update_saved_items = adopted
+        self._update_saved_style = self.window.output_style.currentData()
         if not adopted:
             return self._allow_close(event, updater)
         self._update_export_active = True

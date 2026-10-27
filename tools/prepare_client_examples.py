@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from hanzi_mask.cli import SUPPORTED, natural_key  # noqa: E402
+from hanzi_mask.output_style import DEFAULT_OUTPUT_STYLE, render_mask  # noqa: E402
 from hanzi_mask.preview import comparison_tile, preview_page  # noqa: E402
 from hanzi_mask.processing import Options, process_image  # noqa: E402
 
@@ -140,7 +141,7 @@ def prepare(examples: list[Example], output: Path, options: Options) -> dict:
         expected.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, copied)
         result = process_image(copied, options)
-        Image.fromarray(result.mask).save(expected)
+        Image.fromarray(render_mask(result.mask)).save(expected)
         records.append({
             "character": example.character,
             "note": example.note,
@@ -165,6 +166,7 @@ def prepare(examples: list[Example], output: Path, options: Options) -> dict:
     manifest = {
         "schema_version": 1,
         "method": "texture",
+        "output_style": DEFAULT_OUTPUT_STYLE,
         "purpose": "客户端批量处理演示，expected 是当前参数输出，需视觉复核",
         "parameters": options.to_dict(),
         "input_directory": "input",
@@ -190,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         examples = (discover_external(args.source.expanduser().resolve(), args.count)
                     if args.source else discover_default(PROJECT_ROOT.parent)[:args.count])
-        manifest = prepare(examples, args.output, Options(method="texture", keep_isolated=True,
+        manifest = prepare(examples, args.output, Options(method="texture", texture_strength=0, keep_isolated=True,
                                                         edge_refine=True, stroke_recovery=True,
                                                         tip_recovery=True))
     except (OSError, ValueError, Image.DecompressionBombError) as error:

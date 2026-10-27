@@ -47,7 +47,7 @@ def wait_for(app, condition, timeout=30):
 
 
 def idle(window):
-    return window.worker is None and not window._preview_workers
+    return window.worker is None and not window._preview_workers and window._pending_preview is None
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def window(qapp, monkeypatch, tmp_path):
     for method in ("warning", "information", "critical"):
         monkeypatch.setattr(QMessageBox, method,
                             lambda *args, **kwargs: messages.append(args[1:]) or QMessageBox.Ok)
-    widget = MainWindow(examples_root=tmp_path / "examples")
+    widget = MainWindow()
     widget.output.setText(str(tmp_path / "saved"))
     widget._test_messages = messages
     widget.show()
@@ -103,8 +103,9 @@ def write_two_components(path):
     return path
 
 
-def click_mask_pixel(window, app, x=70, y=18, modifiers=Qt.NoModifier):
+def click_mask_pixel(window, app, x=70, y=18, modifiers=Qt.NoModifier, *, editable=True):
     """Click a source-image pixel through the fitted viewport transform."""
+    window.select_tool_button.click()
     canvas = window.preview.mask_canvas
     rectangle = canvas.image_rect()
     width, height = window.preview.image_size.width(), window.preview.image_size.height()
@@ -114,7 +115,7 @@ def click_mask_pixel(window, app, x=70, y=18, modifiers=Qt.NoModifier):
     QTest.mouseClick(canvas, Qt.LeftButton, modifiers, pos=point)
     app.processEvents()
     assert window.preview.selection_count > 0
-    assert window.clear_component_button.isEnabled()
+    assert window.clear_component_button.isEnabled() == editable
     return window.preview.selection_count
 
 
@@ -130,23 +131,27 @@ def import_and_process(window, qapp, source):
     assert not window._test_messages
 
 
-def test_standalone_launch_and_recursive_examples_import(window, qapp, tmp_path):
+def test_standalone_launch_and_recursive_import(window, qapp, tmp_path):
     first = write_rubbing(tmp_path / "examples" / "安" / "small.png")
     second = write_rubbing(tmp_path / "examples" / "水" / "wide.png", (83, 65))
     assert window.isVisible()
     assert '字形换底' in window.windowTitle()
     assert window.save_mode.currentData() == 'replace'
+    assert window.output_style.currentData() == 'black-on-white'
+    assert window.preview.output_style == 'black-on-white'
     options = window.processing_options()
     assert options.method == "texture"
     assert options.keep_isolated
     assert options.edge_refine and options.stroke_recovery and options.tip_recovery
     assert window.worker is None
-    window.load_examples()
+    window.import_paths([tmp_path / "examples"])
     wait_for(qapp, lambda: idle(window))
     assert {source.path for source in window.inputs} == {first, second}
     assert {source.relative_path.as_posix() for source in window.inputs} == {"安/small.png", "水/wide.png"}
     assert window.table.rowCount() == 2
-    assert window.recursive.isChecked()
+    assert options.texture_strength == 0
+    assert set(window.records) == {first}
+    assert window.history_panel.isVisible()
     assert window.preview.has_image
     assert not window._test_messages
 
@@ -204,25 +209,22 @@ def test_background_processing_review_and_export_only_adopted(window, qapp, tmp_
     assert not window._test_messages
 
 
-def test_parameter_change_keeps_processed_results_and_adoption(window, qapp, tmp_path):
+def test_export_keeps_fixed_processing_parameters_and_adoption(window, qapp, tmp_path):
     path = write_rubbing(tmp_path / "input" / "crop.png")
     import_and_process(window, qapp, path)
     assert window.save_button.isEnabled()
     assert window.adopted_items()
     previous = window.records[path]
     previous_state = window.table.item(0, 3).text()
-    window.live_preview.setChecked(False)
-    window.strength_slider.setValue(600)
     wait_for(qapp, lambda: idle(window))
     assert window.processing_options().profile == "balanced"
-    assert window.processing_options().texture_strength == pytest.approx(.030)
+    assert window.processing_options().texture_strength == 0
     assert window.records[path] is previous
     assert window.adopted_items() == [previous]
     assert window.table.item(0, 0).checkState() == Qt.Checked
     assert window.table.item(0, 3).text() == previous_state
     assert window.save_button.isEnabled()
     assert not window.preview.mask_canvas.image.isNull()
-    assert "尚未应用" in window.parameter_note.text()
     window.save_mode.setCurrentIndex(window.save_mode.findData('export'))
     window.save_results()
     wait_for(qapp, lambda: idle(window))
@@ -230,8 +232,9 @@ def test_parameter_change_keeps_processed_results_and_adoption(window, qapp, tmp
     assert report["images"][0]["parameters"] == previous.options.to_dict()
 
 
+@pytest.mark.parametrize('output_style', ['black-on-white', 'white-on-black'])
 def test_component_cleanup_updates_only_cached_mask_supports_undo_and_exports_correction(
-        window, qapp, tmp_path):
+        window, qapp, tmp_path, output_style):
     path = write_two_components(tmp_path / "input" / "glyph.png")
     original_bytes = path.read_bytes()
     import_and_process(window, qapp, path)
@@ -241,6 +244,11 @@ def test_component_cleanup_updates_only_cached_mask_supports_undo_and_exports_co
     assert original_mask[18, 70] == original_mask[60, 22] == 255
 
     selected_pixels = click_mask_pixel(window, qapp)
+    window.output_style.setCurrentIndex(window.output_style.findData(output_style))
+    assert window.preview.output_style == output_style
+    assert window.preview.selection_count == selected_pixels
+    assert window.worker is None
+    assert window.records[path] is original_item
     window.clear_component_button.click()
     wait_for(qapp, lambda: idle(window))
     corrected_item = window.records[path]
@@ -268,6 +276,11 @@ def test_component_cleanup_updates_only_cached_mask_supports_undo_and_exports_co
     window.clear_component_button.click()
     wait_for(qapp, lambda: idle(window))
     np.testing.assert_array_equal(batch_module.load_mask(window.records[path]), corrected_mask)
+    assert window.undo_correction_button.isEnabled()
+    window.preview.set_output_style('white-on-black' if output_style == 'black-on-white' else 'black-on-white')
+    assert window.output_style.currentData() == window.preview.output_style
+    assert window.undo_correction_button.isEnabled()
+    window.preview.set_output_style(output_style)
     window.save_mode.setCurrentIndex(window.save_mode.findData('export'))
     window.save_results()
     wait_for(qapp, lambda: idle(window))
@@ -275,8 +288,10 @@ def test_component_cleanup_updates_only_cached_mask_supports_undo_and_exports_co
     assert len(exported) == 1
     with Image.open(exported[0]) as image:
         assert image.size == (96, 80)
-        np.testing.assert_array_equal(np.asarray(image), corrected_mask)
+        expected = 255 - corrected_mask if output_style == 'black-on-white' else corrected_mask
+        np.testing.assert_array_equal(np.asarray(image), expected)
     report = json.loads((window._last_output / "report.json").read_text())
+    assert report['output_style'] == output_style
     assert report["images"][0]["metrics"]["foreground_pixels"] == np.count_nonzero(corrected_mask)
     assert path.read_bytes() == original_bytes
     assert not window._test_messages
@@ -372,28 +387,21 @@ def test_focused_mask_keyboard_cleanup_supports_both_polarities_multiselect_and_
 
 
 @pytest.mark.parametrize('key', [Qt.Key_Backspace, Qt.Key_Delete])
-@pytest.mark.parametrize('editor', ['output', 'strength'])
+@pytest.mark.parametrize('editor', ['output', 'search'])
 def test_text_editor_delete_keys_edit_text_without_removing_selected_component(
         window, qapp, tmp_path, key, editor):
-    path = write_two_components(tmp_path / 'input' / 'glyph.png')
+    path = write_two_components(tmp_path / 'input' / '12345-1245-1235.png')
     import_and_process(window, qapp, path)
-    window.live_preview.setChecked(False)
     previous = window.records[path]
     pixels = click_mask_pixel(window, qapp)
-    if editor == 'output':
-        line = window.output
-        line.setText('12345')
-        line.setCursorPosition(3)
-        expected = '1245' if key == Qt.Key_Backspace else '1235'
-    else:
-        line = window.strength_input.lineEdit()
-        line.setText('57.3%')
-        line.setCursorPosition(1)
-        expected = '7.3%' if key == Qt.Key_Backspace else '5.3%'
+    line = getattr(window, editor)
+    line.setText('12345')
+    line.setCursorPosition(3)
+    expected = '1245' if key == Qt.Key_Backspace else '1235'
     line.setFocus()
     qapp.processEvents()
     focused = QApplication.focusWidget()
-    assert focused is line or focused is window.strength_input
+    assert focused is line
     assert focused is not window.preview.mask_canvas
     QTest.keyClick(focused, key)
     qapp.processEvents()
@@ -430,11 +438,10 @@ def test_clearing_all_components_excludes_empty_mask_and_undo_restores_adoption(
     assert path.read_bytes() == original_bytes
 
 
-@pytest.mark.parametrize("change", ["reprocess", "strength"])
+@pytest.mark.parametrize("change", ["reprocess", "rescan"])
 def test_only_successful_regeneration_clears_component_undo_history(window, qapp, tmp_path, change):
     path = write_two_components(tmp_path / "input" / "glyph.png")
     import_and_process(window, qapp, path)
-    window.live_preview.setChecked(False)
     initial_mask = batch_module.load_mask(window.records[path]).copy()
     click_mask_pixel(window, qapp)
     window.clear_component_button.click()
@@ -446,13 +453,13 @@ def test_only_successful_regeneration_clears_component_undo_history(window, qapp
         wait_for(qapp, lambda: idle(window))
         np.testing.assert_array_equal(batch_module.load_mask(window.records[path]), initial_mask)
     else:
-        window.strength_slider.setValue(600)
+        window.rescan()
         wait_for(qapp, lambda: idle(window))
-        assert window.records[path] is corrected
-    assert bool(window._correction_history.get(path)) == (change == "strength")
-    assert window.undo_correction_button.isEnabled() == (change == "strength")
+        assert window.records[path].mask_path == corrected.mask_path
+    assert bool(window._correction_history.get(path)) == (change == "rescan")
+    assert window.undo_correction_button.isEnabled() == (change == "rescan")
     window.undo_correction()
-    if change == "strength":
+    if change == "rescan":
         np.testing.assert_array_equal(batch_module.load_mask(window.records[path]), initial_mask)
 
 
@@ -563,69 +570,6 @@ def track_processing(monkeypatch):
     return calls
 
 
-def test_rapid_strength_changes_process_only_current_image_with_final_value(
-        window, qapp, tmp_path, monkeypatch):
-    source = tmp_path / "input"
-    first = write_rubbing(source / "a.png")
-    write_rubbing(source / "b.png")
-    import_and_process(window, qapp, source)
-    calls = track_processing(monkeypatch)
-    previous = dict(window.records)
-
-    for value in (240, 460, 620):
-        window.strength_slider.setValue(value)
-    assert window.records == previous
-    assert len(window.adopted_items()) == 2
-    wait_for(qapp, lambda: idle(window) and len(calls) == 1
-             and window.records[first].options.texture_strength == .031)
-
-    assert calls == [([first], .031)]
-    assert window.processing_options().texture_strength == pytest.approx(.031)
-    assert window.records[first].metrics["texture_strength"] == pytest.approx(.031)
-    assert len(window.records) == 2
-    other = next(path for path in previous if path != first)
-    assert window.records[other] is previous[other]
-    assert window.preview.has_image
-    assert not window.preview.mask_canvas.image.isNull()
-
-
-def test_strength_drag_waits_for_release_before_background_processing(
-        window, qapp, tmp_path, monkeypatch):
-    path = write_rubbing(tmp_path / "input" / "crop.png")
-    import_and_process(window, qapp, path)
-    calls = track_processing(monkeypatch)
-    window.strength_slider.setSliderDown(True)
-    window.strength_slider.setValue(560)
-    QTest.qWait(window._tuning_timer.interval() + 100)
-    assert not calls
-    assert window.worker is None
-    window.strength_slider.setValue(700)
-    window.strength_slider.setSliderDown(False)
-    wait_for(qapp, lambda: idle(window) and len(calls) == 1
-             and window.records[path].options.texture_strength == .035)
-    assert calls == [([path], .035)]
-
-
-def test_disabling_live_preview_cancels_queued_work_and_manual_processing_still_works(
-        window, qapp, tmp_path, monkeypatch):
-    path = write_rubbing(tmp_path / "input" / "crop.png")
-    import_and_process(window, qapp, path)
-    calls = track_processing(monkeypatch)
-    previous = window.records[path]
-    window.strength_slider.setValue(0)
-    window.live_preview.setChecked(False)
-    QTest.qWait(window._tuning_timer.interval() + 100)
-    qapp.processEvents()
-    assert not calls
-    assert window.worker is None
-    assert window.records[path] is previous
-    assert window.processing_options().texture_strength == 0
-    window.process_current()
-    wait_for(qapp, lambda: idle(window) and path in window.records)
-    assert calls == [([path], 0)]
-    assert window.records[path].metrics["texture_strength"] == 0
-
-
 def test_reprocessing_failure_preserves_previous_mask_and_adoption(
         window, qapp, tmp_path, monkeypatch):
     path = write_rubbing(tmp_path / "input" / "crop.png")
@@ -651,18 +595,21 @@ def test_reprocessing_failure_preserves_previous_mask_and_adoption(
     assert not window._test_messages
 
 
+@pytest.mark.parametrize('output_style', ['black-on-white', 'white-on-black'])
 def test_replacement_requires_confirmation_backs_up_then_restores_original_bytes(
-        window, qapp, tmp_path, monkeypatch):
+        window, qapp, tmp_path, monkeypatch, output_style):
     path = write_rubbing(tmp_path / "input" / "crop.png")
     original = path.read_bytes()
     import_and_process(window, qapp, path)
+    mask = batch_module.load_mask(window.records[path]).copy()
+    window.output_style.setCurrentIndex(window.output_style.findData(output_style))
     assert window.save_mode.currentData() == 'replace'
     assert '原位置' in window.save_button.text()
-    assert '备份' in window.save_note.text()
     calls = []
 
     def refuse(*args, **kwargs):
         calls.append(args[1])
+        assert window.output_style.currentText() in args[2]
         return QMessageBox.No
 
     monkeypatch.setattr(QMessageBox, "question", refuse)
@@ -677,12 +624,14 @@ def test_replacement_requires_confirmation_backs_up_then_restores_original_bytes
     report_path = window._replacement_report
     report = json.loads(report_path.read_text())
     assert report["status"] == "completed"
+    assert report['output_style'] == output_style
     assert len(report["images"]) == 1
     backup = report_path.parent / report["images"][0]["backup"]
     assert backup.read_bytes() == original
     assert path.read_bytes() != original
     with Image.open(path) as image:
         assert set(np.unique(np.asarray(image))) == {0, 255}
+        np.testing.assert_array_equal(np.asarray(image), mask if output_style == 'white-on-black' else 255 - mask)
     assert not window.records
     assert report_path.is_file()
     window.restore_last()

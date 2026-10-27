@@ -20,7 +20,7 @@ def review_hints(metrics: Mapping[str, object], *, can_undo: bool = False) -> li
 
     Missing measurements do not establish a problem. Undo guidance only applies
     to manual cleanup with an available history; regeneration uses the original
-    image and the current strength setting.
+    image and the desktop defaults.
     """
     hints = []
     pixels = _number(metrics, "foreground_pixels")
@@ -36,30 +36,30 @@ def review_hints(metrics: Mapping[str, object], *, can_undo: bool = False) -> li
 
     if empty:
         if manual and can_undo:
-            hints.append('结果为空，默认不采用；可能误删字形主体，可点“撤销清理”检查。')
+            hints.append('结果为空，默认不采用；可能误删字形主体，可点“撤销修改”检查。')
         elif manual:
             hints.append('结果为空，默认不采用；可点“处理当前图片”重新生成。')
         else:
-            hints.append('结果为空，默认不采用；可尝试调低“强度”后“处理当前图片”复核。')
+            hints.append('结果为空，默认不采用；可对照原图用“画笔工具”的字形色手动填补。')
 
     if metrics.get("low_contrast"):
         hints.append('检测到的明暗差异很小，字形可能难以分离；请对照原图检查，无法确认时取消“采用”。')
 
     if heavy_removal and not empty:
         if manual and can_undo:
-            hints.append('删除比例较高，可能误删细笔画；请对照原图检查，必要时点“撤销清理”。')
+            hints.append('删除比例较高，可能误删细笔画；请对照原图检查，必要时点“撤销修改”。')
         elif manual:
             hints.append('删除比例较高，可能误删细笔画；可点“处理当前图片”重新生成后复核。')
         else:
-            hints.append('删除比例较高，细笔画可能缺失；可尝试调低“强度”后“处理当前图片”复核。')
+            hints.append('删除比例较高，细笔画可能缺失；可对照原图用“画笔工具”的字形色手动填补。')
 
     if (pixels is not None and width is not None and height is not None
             and width > 0 and height > 0 and pixels / (width * height) >= .6):
-        hints.append('字形区域占比偏高，可能与背景粘连；无法单独选中杂斑时，请取消“采用”。')
+        hints.append('字形区域占比偏高，可能与背景粘连；可用“画笔工具”的背景色画线分割后选块清理，无法确认时取消“采用”。')
 
     if isolated_removed is not None and isolated_removed > 0:
-        hints.append('已筛除远离主体的小区域，独立点画可能受影响；缺失时先取消“采用”，'
-                     '可勾选“保留独立点画”后“处理当前图片”复核。')
+        hints.append('已筛除远离主体的小区域，独立点画可能受影响；可对照原图用“画笔工具”手动填补，'
+                     '无法确认时取消“采用”。')
 
     if (not manual and not empty
             and ((recovered_pixels is not None and recovered_pixels > 0)
@@ -74,8 +74,8 @@ def review_hints(metrics: Mapping[str, object], *, can_undo: bool = False) -> li
 
     if manual and not empty and not heavy_removal:
         if can_undo:
-            hints.append('已人工清理，请对照原图检查笔画；误删时可点“撤销清理”。')
+            hints.append('已人工修改，请对照原图检查分割与填补处；需要恢复时可点“撤销修改”。')
         else:
-            hints.append('已人工清理，请对照原图检查笔画；误删时可点“处理当前图片”重新生成。')
+            hints.append('已人工修改，请对照原图检查分割与填补处；需要恢复时可点“处理当前图片”重新生成。')
 
     return hints

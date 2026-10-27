@@ -106,14 +106,14 @@ def test_corrected_item_exports_replaces_and_restores_exact_original(sample, tmp
     with Image.open(exported.outputs[0]) as image:
         assert image.size == (50, 40)
         assert set(np.unique(np.asarray(image))) == {0, 255}
-        assert np.array_equal(np.asarray(image), mask)
+        assert np.array_equal(np.asarray(image), 255 - mask)
     report = json.loads(exported.report_path.read_text())
     assert report["schema_version"] == 2
     assert report["parameters"] == report["images"][0]["parameters"] == options.to_dict()
     assert report["images"][0]["metrics"]["manual_correction"]
     replacement = replace_originals(batch, tmp_path / "backup")
     with Image.open(source) as image:
-        assert np.array_equal(np.asarray(image), mask)
+        assert np.array_equal(np.asarray(image), 255 - mask)
     restore_replacement(replacement.report_path)
     assert source.read_bytes() == original_bytes
 
@@ -211,7 +211,7 @@ def test_correction_and_undo_keep_actual_options_under_changed_batch_context(sam
         assert report["parameters"] == report["images"][0]["parameters"] == actual.to_dict()
         assert report["batch_context_parameters"] == changed_context.to_dict()
         with Image.open(summary.outputs[0]) as image:
-            assert np.array_equal(np.asarray(image), load_mask(item))
+            assert np.array_equal(np.asarray(image), 255 - load_mask(item))
     assert not np.array_equal(load_mask(original), load_mask(first))
     assert not np.array_equal(load_mask(first), load_mask(second))
     assert source.read_bytes() == source_bytes

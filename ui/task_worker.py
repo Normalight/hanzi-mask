@@ -10,6 +10,7 @@ from hanzi_mask.batch_service import (
 )
 from hanzi_mask.processing import load_image
 from hanzi_mask.manual_correction import apply_correction
+from hanzi_mask.output_style import DEFAULT_OUTPUT_STYLE
 
 
 class TaskWorker(QThread):
@@ -38,9 +39,11 @@ class TaskWorker(QThread):
                                        max_workers=p.get("max_workers"),
                                        per_image_options=p.get("per_image_options"))
             elif self.operation == "export":
-                result = export_batch(p["batch"], p["directory"], self.isInterruptionRequested, progress)
+                result = export_batch(p["batch"], p["directory"], self.isInterruptionRequested, progress,
+                                      output_style=p.get("output_style", DEFAULT_OUTPUT_STYLE))
             elif self.operation == "replace":
-                result = replace_originals(p["batch"], p["directory"], self.isInterruptionRequested, progress)
+                result = replace_originals(p["batch"], p["directory"], self.isInterruptionRequested, progress,
+                                           output_style=p.get("output_style", DEFAULT_OUTPUT_STYLE))
             elif self.operation == "restore":
                 result = restore_replacement(p["report"], progress)
             elif self.operation == "correct":

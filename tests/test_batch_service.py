@@ -133,6 +133,47 @@ def test_cached_results_load_on_demand_and_export(tmp_path, options):
         service.export_batch(batch, tmp_path / "export")
 
 
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("operation", ["export", "replace"])
+@pytest.mark.parametrize("output_style", [None, "black-on-white", "white-on-black"])
+def test_save_colors_match_selection_without_changing_canonical_mask(
+        tmp_path, options, cached, operation, output_style):
+    sources, batch = batch_for(tmp_path, options, count=1, cached=cached)
+    original_bytes = sources[0].read_bytes()
+    item = batch.items[0]
+    mask = service.load_mask(item).copy()
+    assert mask[0, 0] == 0 and mask[8, 8] == 255
+    cached_bytes = item.mask_path.read_bytes() if cached else None
+    kwargs = {} if output_style is None else {"output_style": output_style}
+    save = service.export_batch if operation == "export" else service.replace_originals
+    summary = save(batch, tmp_path / "saved", **kwargs)
+    expected = mask if output_style == "white-on-black" else 255 - mask
+    with Image.open(summary.outputs[0]) as image:
+        assert image.size == (31, 23)
+        np.testing.assert_array_equal(np.asarray(image), expected)
+    report = read_report(summary.report_path)
+    assert report["output_style"] == (output_style or "black-on-white")
+    assert report["images"][0]["output_sha256"] == sha256(summary.outputs[0].read_bytes()).hexdigest()
+    np.testing.assert_array_equal(service.load_mask(item), mask)
+    if cached:
+        assert item.mask_path.read_bytes() == cached_bytes
+    if operation == "replace":
+        backup = summary.report_path.parent / report["images"][0]["backup"]
+        assert backup.read_bytes() == original_bytes
+        service.restore_replacement(summary.report_path)
+    assert sources[0].read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("save", [service.export_batch, service.replace_originals])
+def test_invalid_output_style_is_rejected_before_writing(tmp_path, options, save):
+    sources, batch = batch_for(tmp_path, options, count=1)
+    before = sources[0].read_bytes()
+    with pytest.raises(ValueError, match="输出底色"):
+        save(batch, tmp_path / "saved", output_style="invalid")
+    assert not (tmp_path / "saved").exists()
+    assert sources[0].read_bytes() == before
+
+
 def test_process_cancellation_returns_partial_cache_without_resident_images(tmp_path, options):
     files = [make_image(tmp_path / f"{i}.png") for i in range(3)]
     stopped = False

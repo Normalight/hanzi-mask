@@ -13,6 +13,7 @@ import time
 from PIL import Image
 
 from . import __version__
+from .output_style import DEFAULT_OUTPUT_STYLE, OUTPUT_STYLES, render_mask
 from .preview import comparison_tile, preview_page
 from .processing import Options, PROFILES, process_image
 
@@ -22,10 +23,12 @@ SUPPORTED = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(
-        description="提取拓片单字候选掩膜，批量导出黑底白字 PNG。结果需要视觉复核。"
+        description="提取拓片单字候选掩膜，批量导出白底黑字或黑底白字 PNG，默认白底黑字。结果需要视觉复核。"
     )
     command.add_argument("input", type=Path, help="输入图片或文件夹")
     command.add_argument("-o", "--output", required=True, type=Path, help="输出文件夹")
+    command.add_argument("--output-style", choices=OUTPUT_STYLES, default=DEFAULT_OUTPUT_STYLE,
+                         help="输出底色：black-on-white 白底黑字（默认）；white-on-black 黑底白字")
     command.add_argument("--recursive", action="store_true", help="扫描子文件夹，保留相对路径")
     command.add_argument("--profile", choices=PROFILES, default="balanced", help="去噪强度")
     command.add_argument("--method", choices=["texture", "morphology"], default="texture", help="texture 纹理与结构分离（默认）；morphology 使用原有几何筛选")
@@ -172,15 +175,15 @@ def run(args: argparse.Namespace, command: argparse.ArgumentParser) -> int:
             manual_mask = None
         try:
             result = process_image(path, options, manual_mask)
-            write_output(target, image_bytes(Image.fromarray(result.mask), "PNG"), args.overwrite)
+            write_output(target, image_bytes(Image.fromarray(render_mask(result.mask, args.output_style)), "PNG"), args.overwrite)
             record.update(status="converted", **result.metrics)
         except (OSError, ValueError, Image.DecompressionBombError) as error:
             record.update(status="error", error=str(error))
             print(f"[{index}/{len(files)}] 失败 {record['source']}：{error}", file=sys.stderr)
         else:
-            print(f"[{index}/{len(files)}] 完成 {record['source']} · 白色区域 {result.metrics['components']} 个")
+            print(f"[{index}/{len(files)}] 完成 {record['source']} · 前景区域 {result.metrics['components']} 个")
             if args.preview:
-                tiles.append(comparison_tile(record["source"], result))
+                tiles.append(comparison_tile(record["source"], result, args.output_style))
                 if len(tiles) == 12:
                     flush_preview()
         records.append(record)
@@ -194,6 +197,7 @@ def run(args: argparse.Namespace, command: argparse.ArgumentParser) -> int:
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "source": str(source),
         "output": str(output),
+        "output_style": args.output_style,
         "parameters": options.to_dict(),
         "mask_dir": str(mask_dir) if mask_dir else None,
         "summary": summary,
