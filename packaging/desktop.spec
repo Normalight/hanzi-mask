@@ -33,6 +33,10 @@ a = Analysis(
     noarchive=False,
 )
 protection['apply'](a, source)
+if sys.platform == 'win32':
+    # Qt uses Windows ICU. Anaconda's same-named library exports a different ABI.
+    a.binaries = [entry for entry in a.binaries
+                  if Path(entry[0]).name.lower() not in {'icuuc.dll', 'icudt73.dll'}]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='hanzi-mask',
           console=False, strip=False, upx=False,

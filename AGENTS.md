@@ -72,6 +72,8 @@ python app.py ../10-1dbe -o output/10-1dbe --preview
 
 ## CI 与打包
 
+桌面登录后自动检查更新，侧栏“检查更新”接入共享更新控制器；Windows 原生安装器使用简体中文，首次安装默认勾选创建桌面快捷方式，覆盖升级不显示该选项或重建快捷方式。
+
 ZIP 边界：Windows `shutil.make_archive` 默认允许 Zip64；Mac `ditto` 的传统 ZIP 大小字段可能溢出，源文件合计达到 4 GiB 或源条目达到 65,535 时拒绝打包。两平台压缩后核对常规源文件条目大小并执行 ZIP CRC 检查，通过后才生成流式 SHA-256 并上传。不要使用 `archive.read_bytes()` 计算大包摘要。边界测试用临时稀疏文件或降低 Python ZIP64_LIMIT，不触发客户端构建。
 
 `.github/workflows/native-build.yml` 为正式发布构建：输入版本（需已提交 `RELEASE_NOTES_v<版本>.md`）与平台；`target=all` 按 `requirements.txt` 指向的 vendored hanzi-update wheel 中 `products.json` 本产品 `targets` 并行构建当前配置的 Windows x64、Mac arm64、Mac Intel，安装 WinSparkle/Sparkle SDK、Cython 保护后产出 Windows 安装器与 Mac 更新 ZIP；`publish=false` 只上传 Artifact，签名发布由本机密钥或 CI Secrets 完成。更新签名私钥为本机钥匙串 `https://sparkle-project.org` 的 `hanzi-hanzi-mask-stable` 账户与仓库 Secret `HANZI_UPDATE_PRIVATE_KEY`（与 `packaging/native_update_public.json` 公钥配对），私钥不得进入仓库或文档。发布时 CI 用 `packaging/native_publish.py --github-only` 发布 GitHub 版本与 stable appcast，不直接上传 GitCode。不要手工上传 GitCode 附件；由 hanzi-auth 镜像器扫描 Release、按后台平台配置同步安装包和 feed 并校验。`build_mac.sh [arm64|x86_64]` 构建 Mac 原生结构（Runtime.app + 外层产品 app），设置 `HANZI_UPDATE_FEED` 时由 `native_release.py` 生成签名更新包。
@@ -80,4 +82,4 @@ ZIP 边界：Windows `shutil.make_archive` 默认允许 Zip64；Mac `ditto` 的�
 
 依赖统一在 `packaging/requirements-build.txt`，平台 requirements 引用它。`packaging/build_desktop.py --check --target macos-arm64` 仅检查，无编译；`--target` 不带 `--check` 才实际构建。保护后的业务入口包含 `ui/window.py`；成品的 `--smoke-test` 检查本地窗口、图片编解码和 texture 求解，不启用认证或更新。不需要训练模型、邻仓源码、GitCode 或更新 SDK 原生发行资源。
 
-`packaging/protection.py` 原样复制自 `hanzi-auth/tools/desktop_packaging/protection.py`，摘要 `5045e63416373304b40b7f74e3e69876e952a539e4e87abdac201e8bc0e733a3`。公共逻辑只在源头改，本项目尚未加入共享同步脚本，需显式复制并核验。其他新增打包脚本为本产品维护。源码默认输出仍在项目 `output/字形换底/`；冻结运行默认在用户文稿 `字形换底/`（缺文稿路径退回主目录），由 `ui/paths.py` 决定，不写应用资源目录。
+`packaging/protection.py` 等共享打包脚本在 `hanzi-auth/tools/desktop_packaging/` 维护，通过 `tools/sync_desktop.py` 同步并检查；产品专用打包配置和启动检查在本项目维护。源码默认输出仍在项目 `output/字形换底/`；冻结运行默认在用户文稿 `字形换底/`（缺文稿路径退回主目录），由 `ui/paths.py` 决定，不写应用资源目录。

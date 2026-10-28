@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip('PySide6')
 from PySide6.QtCore import QCoreApplication, QEvent, QObject
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QComboBox, QLabel, QMainWindow, QMessageBox, QWidget
+from PySide6.QtWidgets import QComboBox, QLabel, QMainWindow, QMessageBox, QPushButton, QWidget
 
 from hanzi_mask.batch_service import ProcessingError, SaveSummary
 from ui.platform_integration import (
@@ -84,6 +84,7 @@ class FakeWindow(QMainWindow):
         super().__init__()
         self.setCentralWidget(QWidget())
         self.status = QLabel()
+        self.check_updates_button = QPushButton('检查更新')
         self.preview = FakePreview()
         self.worker = None
         self._task_operation = None
@@ -238,7 +239,7 @@ def test_attach_services_uses_save_lock_and_update_precheck_callbacks(bridge, mo
     assert calls[0][4] == services.lock_session
     assert calls[1][1:3] == (window, PRODUCT)
     kwargs = calls[1][3]
-    assert 'button' not in kwargs
+    assert kwargs['button'] is window.check_updates_button
     assert kwargs['precheck'] == guard.check_native_update
     assert not kwargs['is_locked']()
     guard.locked = True

@@ -176,6 +176,8 @@ class MainWindow(QMainWindow):
         self.open_output_button.setToolTip('打开最近一次导出结果或原图备份所在目录。')
         self.open_output_button.clicked.connect(self.open_output)
         side.addWidget(self.open_output_button)
+        self.check_updates_button = QPushButton('检查更新')
+        side.addWidget(self.check_updates_button)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

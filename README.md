@@ -73,11 +73,11 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 `ui/platform_integration.py` 提供共享认证、窗口保护和原生更新接入，按需导入共享包；独立产品标识为 `hanzi-mask`。`ui/window.py` 的桌面启动函数依次调用 `start_platform_session` 与 `attach_platform_services`：GUI 启动先完成共享登录（取消登录即退出，不进入本地窗口），登录成功后挂接授权守卫与原生更新。命令行入口保持本地行为，不加载共享模块。
 
-`hanzi-mask` 已在 `hanzi-update` 的 products.json 注册表与服务端登记；v1.0.0 起提供签名安装包与稳定更新源，客户端通过“检查更新”获取后续版本。平台依赖使用 `vendor/hanzi_auth-0.2.15-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.9-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
+`hanzi-mask` 已在 `hanzi-update` 的 products.json 注册表与服务端登记；v1.0.0 起提供签名安装包与稳定更新源。登录后自动检查更新，之后每日检查；也可点击侧栏“检查更新”或“帮助 → 检查更新”。平台依赖使用 `vendor/hanzi_auth-0.2.15-py3-none-any.whl` 与 `vendor/hanzi_update-0.1.9-py3-none-any.whl`，从本项目目录安装 `requirements.txt` 后再安装 `.[platform]` 即可使用本地 wheel。
 
 锁定救援保存将已采用的缓存结果固定导出为副本。锁定时协作取消计算并等待任务结束，保留结果缓存和人工清理的撤销记录；更新时，有采用结果则先在后台导出，成功完成并核对保存范围后才继续退出。原生更新准备期间的试探关闭保留缓存，实际关闭仍等待后台任务完成。
 
-共享依赖由 `hanzi-auth/tools/sync_desktop.py` 维护，目前同步目标为字符检测和字形归并两个仓库。更新本项目 wheel 时需同步核对依赖引用与包版本；将本项目加入自动同步前，需明确 wheel 和打包脚本各自的目的地。当前沿用已分发的 wheel，不自动重建共享源码。
+共享依赖由 `hanzi-auth/tools/sync_desktop.py` 维护，同步目标包括字符检测、字形归并和字形换底。更新 wheel 时需同步核对依赖引用与包版本。
 
 ## 命令行使用
 
@@ -175,9 +175,19 @@ Windows 下使用 `py -3.11 -m venv .venv` 创建环境，将后续 `.venv/bin/p
 
 [Build native installers](https://github.com/Normalight/hanzi-mask/actions/workflows/native-build.yml) 手动触发，输入版本号（需先提交对应 `RELEASE_NOTES_v<版本>.md`）并可选平台。流程下载并校验 WinSparkle / Sparkle 官方 SDK，配置 `packaging/native_update_public.json` 的更新源与公钥后构建：Windows x64 产出 Inno Setup 安装器并做安装后冒烟检查，macOS arm64 与 x86_64 产出含 Sparkle 的更新 ZIP。默认仅上传 Artifact；勾选 `publish` 后用仓库 Secrets 签名并发布（需要 `HANZI_UPDATE_PRIVATE_KEY`、`PUBLIC_RELEASE_TOKEN`、`GITCODE_TOKEN`）。也可本机签名后 `packaging/native_publish.py --github-only` 发布 GitHub 侧，GitCode 与平台版本登记由认证服务镜像器自动完成。
 
+Windows 安装器使用简体中文；首次安装默认勾选创建桌面快捷方式，可取消勾选。覆盖升级不显示该选项，也不重建桌面快捷方式。
+
 ## 桌面构建 CI
 
 Windows 压缩使用 Python `shutil.make_archive`，按需启用 Zip64。Mac 使用 `ditto` 保留应用元数据：当源文件总大小达到 4 GiB 或源条目数达到 65,535 时提前停止，不依赖其生成 Zip64。两平台生成 ZIP 后逐文件核对源大小并检查 CRC，通过后才生成流式 SHA-256 校验文件和上传；额外元数据或压缩开销造成的问题由成品检查发现。大包不会被整包读入内存计算摘要。
+
+Windows 本地一键打包需安装 Python 3.11 x64，以及带 MSVC x64 工具和 Windows SDK 的 Visual Studio Build Tools。在项目根目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
+```
+
+脚本自动配置编译环境、创建 `.venv`、安装固定版本依赖、校验 wheel、运行测试，并完成 Cython 编译、PyInstaller 打包、成品启动检查和 ZIP 压缩。产物位于 `dist/release/`，解压后运行 `hanzi-mask/hanzi-mask.exe`。可用 `-Python C:\Python311\python.exe` 指定首次创建虚拟环境的解释器；已有 `.venv` 使用其 Python 3.11。`-SkipTests` 可跳过源码测试，成品检查仍会执行。
 
 [Build desktop apps](https://github.com/Normalight/hanzi-mask/actions/workflows/build.yml) 仅支持手动 `workflow_dispatch`，可选择三个平台或单个平台；提交、PR、标签和 Release 不自动启动。使用 Python 3.11，在 Windows x64（`windows-2022`）、macOS arm64（`macos-15`）和 macOS x86_64（`macos-15-intel`）执行依赖及 wheel 校验、测试、Cython 保护、PyInstaller 打包和独立目录下的成品启动检查。运行器架构见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
 
@@ -193,7 +203,7 @@ Windows 压缩使用 Python `shutil.make_archive`，按需启用 Zip64。Mac 使
 
 实际构建需在目标平台安装 `packaging/requirements-mac.txt` 或 `packaging/requirements-windows.txt`，并具备 Xcode Command Line Tools 或 MSVC C++ Build Tools，再执行 `python packaging/build_desktop.py --target <平台>`。构建脚本完成打包、成品检查和压缩；源码测试由 CI 单独执行。
 
-`packaging/protection.py` 是 `hanzi-auth/tools/desktop_packaging/protection.py` 的原样副本，源摘要为 `5045e63416373304b40b7f74e3e69876e952a539e4e87abdac201e8bc0e733a3`。公共保护逻辑在源头维护；本项目尚未加入共享同步清单，更新时显式复制并验证，不能独立改此副本。其余打包入口和启动检查为本产品维护。
+`packaging/protection.py` 等共享打包脚本由 `hanzi-auth/tools/desktop_packaging/` 维护，通过 `tools/sync_desktop.py` 同步到本项目；产品专用打包配置和启动检查在本项目维护。
 
 ## 开发测试
 

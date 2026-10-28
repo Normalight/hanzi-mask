@@ -1,7 +1,7 @@
-"""Optional shared account and update bridge, enabled explicitly at startup.
+"""Shared account and update bridge for the desktop client.
 
 Importing this module does not load either shared SDK. The normal desktop and
-CLI remain independent until the startup integration calls are enabled.
+CLI remains independent of the desktop startup integration.
 """
 
 from PySide6.QtCore import QObject, QTimer, Slot
@@ -31,6 +31,7 @@ def attach_platform_services(window, session):
     services.guard = protect_window(window, session, services.export_preserved_results,
                                     services.lock_session)
     services.updater = attach_updates(window, session.product,
+                                      button=window.check_updates_button,
                                       is_locked=lambda: services.guard.locked,
                                       precheck=services.guard.check_native_update)
     return services
