@@ -390,7 +390,7 @@ def test_default_brush_splits_a_component_then_fills_with_binary_native_pixels(p
     assert np.all(panel.remove_selected()[10:60, 10:40] == 0)
     canvas.set_tool('brush')
     assert panel.selection_count == 0
-    QTest.keyClick(canvas, Qt.Key_X)
+    canvas.set_brush_foreground(True)
     assert canvas.brush_foreground
     draw_stroke(canvas, (40, 10), (40, 59))
     assert len(revisions) == 2
@@ -412,7 +412,20 @@ def test_brush_noop_letterbox_and_disabled_canvas_do_not_submit(panel):
     np.testing.assert_array_equal(canvas._mask, mask)
 
 
-@pytest.mark.parametrize('cancel', ['escape', 'tool', 'style', 'image', 'focus', 'disable'])
+def test_x_and_escape_do_not_change_brush_or_cancel_stroke(panel):
+    mask = component_mask()
+    panel.set_images(Image.new('RGB', (80, 70), 'gray'), mask, mask)
+    canvas = panel.mask_canvas
+    point = pixel_position(canvas, 36, 12)
+    QTest.keyClick(canvas, Qt.Key_X)
+    assert not canvas.brush_foreground
+    QTest.mousePress(canvas, Qt.LeftButton, pos=point)
+    QTest.keyClick(canvas, Qt.Key_Escape)
+    assert canvas._stroke_mask is not None
+    QTest.mouseRelease(canvas, Qt.LeftButton, pos=point)
+
+
+@pytest.mark.parametrize('cancel', ['tool', 'style', 'image', 'focus', 'disable'])
 def test_unfinished_brush_is_cancelled_without_changing_committed_result(panel, cancel):
     mask = component_mask()
     panel.set_images(Image.new('RGB', (80, 70), 'gray'), mask, mask)
@@ -424,9 +437,7 @@ def test_unfinished_brush_is_cancelled_without_changing_committed_result(panel, 
     assert canvas._stroke_mask is not None
     assert canvas.image.pixelColor(36, 12).red() == 255
     assert canvas._mask[12, 36] == 255
-    if cancel == 'escape':
-        QTest.keyClick(canvas, Qt.Key_Escape)
-    elif cancel == 'tool':
+    if cancel == 'tool':
         canvas.set_tool('select')
     elif cancel == 'style':
         panel.set_mask_inverted(False)

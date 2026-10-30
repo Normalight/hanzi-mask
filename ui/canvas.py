@@ -392,16 +392,6 @@ class MaskCanvas(ImageCanvas):
             self.panel.clear_requested.emit()
             event.accept()
             return
-        if event.key() == Qt.Key_Escape:
-            self.cancel_stroke()
-            self.clear_selection()
-            event.accept()
-            return
-        if (self.tool == "brush" and self.editable and event.key() == Qt.Key_X
-                and event.modifiers() == Qt.NoModifier):
-            self.set_brush_foreground(not self.brush_foreground)
-            event.accept()
-            return
         super().keyPressEvent(event)
 
     def _paint_overlay(self, painter):
@@ -458,7 +448,7 @@ class PreviewPanel(QWidget):
             layout.addWidget(label)
             if index == 1:
                 self.mask_title = label
-                label.setToolTip("画笔：背景色擦除，字形色填补，X 切换双色；选中色块：Ctrl/Command 多选，退格/Delete 清理；右键切换输出底色")
+                label.setToolTip("画笔：背景色擦除，字形色填补；选中色块：Ctrl/Command 多选，退格/Delete 清理；右键切换输出底色")
                 canvas = MaskCanvas(self, parent=column)
             else:
                 canvas = ImageCanvas(self, placeholder="请选择图片" if index == 0 else "未处理",

@@ -281,3 +281,26 @@ def test_switch_to_unprocessed_image_during_correction_runs_after_commit(window,
     window.table.setCurrentCell(0, 1)
     wait_for(qapp, lambda: idle(window))
     assert window.undo_correction_button.isEnabled()
+
+
+def test_completed_correction_keeps_preview_when_refreshed(window, qapp, tmp_path, monkeypatch):
+    path = write_two_components(tmp_path / 'glyph.png')
+    import_and_process(window, qapp, path)
+    brush(window, qapp, (8, 40), (36, 40))
+    request = window._preview_request
+    image_key = window.preview.original_canvas.image.cacheKey()
+    window._refresh_preview()
+    qapp.processEvents()
+    assert window._preview_request == request
+    assert not window._preview_workers
+    assert window.preview.original_canvas.image.cacheKey() == image_key
+
+
+def test_processed_preview_is_not_reloaded_when_unchanged(window, qapp, tmp_path):
+    path = write_two_components(tmp_path / 'glyph.png')
+    import_and_process(window, qapp, path)
+    request = window._preview_request
+    window._refresh_preview()
+    qapp.processEvents()
+    assert window._preview_request == request
+    assert not window._preview_workers

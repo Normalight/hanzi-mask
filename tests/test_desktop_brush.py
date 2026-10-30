@@ -83,19 +83,21 @@ def test_default_brush_cut_select_fill_export_and_undo(window, qapp, tmp_path, s
     assert not window._test_messages
 
 
-def test_brush_color_shortcut_tracks_polarity_and_does_not_edit_result(window, qapp, tmp_path):
+def test_brush_color_buttons_track_polarity_and_do_not_edit_result(window, qapp, tmp_path):
     path = write_two_components(tmp_path / 'glyph.png')
     import_and_process(window, qapp, path)
     item = window.records[path]
     canvas = window.preview.mask_canvas
     canvas.setFocus()
     QTest.keyClick(canvas, Qt.Key_X)
+    assert not canvas.brush_foreground
+    window.foreground_brush_button.click()
     assert canvas.brush_foreground and window.foreground_brush_button.isChecked()
     assert '黑色' in window.foreground_brush_button.accessibleName()
     window.preview.set_output_style('white-on-black')
     assert canvas.brush_foreground and window.foreground_brush_button.isChecked()
     assert '白色' in window.foreground_brush_button.accessibleName()
-    QTest.keyClick(canvas, Qt.Key_X)
+    window.background_brush_button.click()
     assert not canvas.brush_foreground and window.background_brush_button.isChecked()
     assert '黑色' in window.background_brush_button.accessibleName()
     assert window.records[path] is item and not window._correction_history

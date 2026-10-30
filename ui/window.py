@@ -123,10 +123,7 @@ class MainWindow(QMainWindow):
         self.root_list.setTextElideMode(Qt.ElideMiddle)
         self.root_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.root_list.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        for signal in (self.root_list.model().rowsInserted, self.root_list.model().rowsRemoved,
-                       self.root_list.model().modelReset):
-            signal.connect(self._fit_input_list)
-        self._fit_input_list()
+        self.root_list.setFixedHeight(120)
         self.root_list.setToolTip('可添加多个文件夹或直接拖入图片')
         source_layout.addWidget(self.root_list)
         self.scan_button = QPushButton('重新扫描')
@@ -166,9 +163,6 @@ class MainWindow(QMainWindow):
         self.strength_reset = QPushButton('恢复默认精度')
         self.strength_reset.clicked.connect(lambda: self._precision_changed(0))
         form.addRow(self.strength_reset)
-        self.parameter_note = QLabel('调整后自动处理当前图片；批量处理使用各图的设置。')
-        self.parameter_note.setWordWrap(True)
-        form.addRow(self.parameter_note)
         side.addWidget(self.parameters)
 
         process_row = QHBoxLayout()
@@ -224,8 +218,8 @@ class MainWindow(QMainWindow):
         self.open_output_button.setToolTip('打开最近一次保存的图片所在目录。')
         self.open_output_button.clicked.connect(self.open_output)
         side.addWidget(self.open_output_button)
+        side.addStretch(1)
         self.check_updates_button = QPushButton('检查更新')
-        side.addWidget(self.check_updates_button)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -246,6 +240,7 @@ class MainWindow(QMainWindow):
         self.current_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.current_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
         preview_bar.addWidget(self.current_name, 1)
+        preview_bar.addWidget(self.check_updates_button)
         self.preview = PreviewPanel()
         self.preview.output_style_changed.connect(self._preview_style_changed)
         self.preview.selected_pixels.connect(self._selection_changed)
@@ -365,11 +360,9 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().hide()
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        for column, width in enumerate((55, 330, 100, 100, 320)):
+            self.table.setColumnWidth(column, width)
         self.table.itemSelectionChanged.connect(self.preview_selection)
         self.table.itemChanged.connect(self._table_item_changed)
         table_layout.addWidget(self.table, 1)
@@ -393,11 +386,16 @@ class MainWindow(QMainWindow):
         self.history_list.itemClicked.connect(self._history_item_activated)
         self.history_list.itemActivated.connect(self._history_item_activated)
         history_layout.addWidget(self.history_list, 1)
-        side.addWidget(self.history_panel, 1)
-        body.addWidget(table_panel)
+        lower_splitter = QSplitter(Qt.Horizontal)
+        lower_splitter.setChildrenCollapsible(False)
+        lower_splitter.addWidget(table_panel)
+        lower_splitter.addWidget(self.history_panel)
+        lower_splitter.setStretchFactor(0, 1)
+        lower_splitter.setSizes([800, 240])
+        body.addWidget(lower_splitter)
         body.setStretchFactor(0, 1)
-        body.setStretchFactor(1, 0)
-        body.setSizes([600, 180])
+        body.setStretchFactor(1, 1)
+        body.setSizes([390, 300])
         work.addWidget(body, 1)
         footer = QHBoxLayout()
         self.progress = QProgressBar()
@@ -430,8 +428,6 @@ class MainWindow(QMainWindow):
             'QListWidget, QTableWidget { border: 1px solid #d8dde5; border-radius: 3px; background: #ffffff; alternate-background-color: #f7f9fc; }'
             'QHeaderView::section { background: #eef1f5; color: #4b5563; border: none; border-bottom: 1px solid #d8dde5; padding: 5px; }'
             'QSplitter::handle { background: #e5e8ed; }')
-        self.escape = QShortcut(QKeySequence('Escape'), self)
-        self.escape.activated.connect(self.cancel_task)
         self.history_shortcuts = []
         bindings = history_key_bindings()
         self._history_key_sequences = {sequence.toString(QKeySequence.PortableText)
@@ -451,10 +447,6 @@ class MainWindow(QMainWindow):
         self.redo_correction_button.setToolTip('恢复刚撤销的修改：' + redo_keys)
         self._set_correction_tool('brush')
         self._update_buttons()
-
-    def _fit_input_list(self, *_):
-        rows = max(1, min(2, self.root_list.count()))
-        self.root_list.setFixedHeight(rows * (self.fontMetrics().height() + 6) + 6)
 
     def eventFilter(self, watched, event):
         if (isinstance(watched, QLineEdit) and event.type() == QEvent.ShortcutOverride
@@ -484,9 +476,6 @@ class MainWindow(QMainWindow):
     def _scope_changed(self):
         self._discard_pending_preview()
         self._sync_tuning_controls()
-        self.parameter_note.setText('调整后自动处理当前图片；批量处理使用各图的设置。'
-                                    if self.application_scope.currentData() == 'current' else
-                                    '设置统一精度后，点击“批量处理全部”应用。')
 
     def _precision_changed(self, percent):
         self._discard_pending_preview()
@@ -864,6 +853,7 @@ class MainWindow(QMainWindow):
             if (corrected_mask is not None and not self._preview_loading
                     and self._displayed_preview_path == current.path and self.preview.has_image):
                 self.preview.update_mask(corrected_mask)
+                self._preview_key = (current.path, id(item))
             else:
                 self._refresh_preview()
 
@@ -1022,7 +1012,7 @@ class MainWindow(QMainWindow):
         item = self.records.get(source.path) if source is not None else None
         key = (source.path, id(item)) if source is not None else None
         if (not self._closing and key is not None and key == self._preview_key
-                and self._preview_loading):
+                and (self._preview_loading or source.path == self._displayed_preview_path)):
             return
         self._cancel_previews()
         self._preview_key = key
@@ -1118,12 +1108,13 @@ class MainWindow(QMainWindow):
             button.setAccessibleName(f'{color} · {action}')
             button.setChecked(canvas.brush_foreground == foreground)
             help_text = ('填补缺失笔画' if foreground else '用背景色画线，分离粘连色块')
-            button.setToolTip(f'{color} · {action}：{help_text}；在画布按 X 切换双色')
+            button.setToolTip(f'{color} · {action}：{help_text}')
 
     def _selection_changed(self, pixels):
         if self.preview.mask_canvas.tool == 'brush':
-            self.correction_note.setText('拖动精修 · X 切换双色 · Esc 取消当前一笔')
+            self.correction_note.hide()
         else:
+            self.correction_note.show()
             self.correction_note.setText(f'已选中 {pixels} 个像素 · 退格或 Delete 清理' if pixels else
                                          '点击选块 · Ctrl/Command 多选 · Delete 清理')
         self._update_buttons()

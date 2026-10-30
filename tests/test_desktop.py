@@ -152,6 +152,13 @@ def test_standalone_launch_and_recursive_import(window, qapp, tmp_path):
     assert options.texture_strength == 0
     assert set(window.records) == {first}
     assert window.history_panel.isVisible()
+    assert window.history_panel.parent() is window.table.parent().parent()
+    assert window.root_list.height() == 120
+    assert window.body_splitter.sizes()[1] >= 250
+    assert window.parameters.height() < 220
+    from PySide6.QtWidgets import QHeaderView
+    assert all(window.table.horizontalHeader().sectionResizeMode(i) == QHeaderView.Interactive
+               for i in range(window.table.columnCount()))
     assert window.preview.has_image
     assert not window._test_messages
 
