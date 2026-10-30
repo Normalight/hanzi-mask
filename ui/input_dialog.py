@@ -1,50 +1,31 @@
-"""One cross-platform picker for image files and recursively scanned folders."""
+"""Platform file and directory pickers using Qt's native dialog helpers."""
 
-from pathlib import Path
-
-from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QListView, QTreeView,
-)
+from PySide6.QtCore import QLibraryInfo, QTranslator
+from PySide6.QtWidgets import QFileDialog
 
 
-class ImageInputDialog(QFileDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent, '添加图片或文件夹')
-        # Native QFileDialog APIs cannot select files and folders in one session.
-        self.setOption(QFileDialog.DontUseNativeDialog, True)
-        self.setFileMode(QFileDialog.ExistingFiles)
-        self.setNameFilter('图片 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)')
-        self.setLabelText(QFileDialog.Accept, '添加所选')
-        self.setLabelText(QFileDialog.Reject, '取消')
-        self.setLabelText(QFileDialog.LookIn, '位置：')
-        self.setLabelText(QFileDialog.FileName, '图片或文件夹：')
-        self.setLabelText(QFileDialog.FileType, '文件类型：')
-        self.resize(850, 560)
-        for view_type, name in ((QListView, 'listView'), (QTreeView, 'treeView')):
-            view = self.findChild(view_type, name)
-            if view is not None:
-                view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-                view.selectionModel().selectionChanged.connect(self._update_accept_label)
-        self.paths = []
+def install_dialog_translations(app):
+    """Keep Qt's fallback dialog in Chinese when no native helper is available."""
+    if getattr(app, '_hanzi_dialog_translator', None) is not None:
+        return True
+    translator = QTranslator(app)
+    if translator.load('qtbase_zh_CN', QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
+        app.installTranslator(translator)
+        app._hanzi_dialog_translator = translator
+        return True
+    translator.deleteLater()
+    return False
 
-    def _update_accept_label(self, *_):
-        # Qt changes this label to "Open" for a selected folder; our action adds it.
-        box = self.findChild(QDialogButtonBox)
-        for button in box.buttons():
-            if box.buttonRole(button) == QDialogButtonBox.AcceptRole:
-                button.setText('添加所选')
 
-    def accept(self):
-        paths = [Path(path) for path in self.selectedFiles()]
-        if paths and all(path.is_file() or path.is_dir() for path in paths):
-            self.paths = [str(path) for path in paths]
-            # QFileDialog.accept rejects directories in ExistingFiles mode.
-            QDialog.accept(self)
+class ImageInputDialog:
+    @staticmethod
+    def choose(parent=None):
+        paths, _ = QFileDialog.getOpenFileNames(
+            parent, '添加图片', '',
+            '图片 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)')
+        return paths
 
-    @classmethod
-    def choose(cls, parent=None):
-        dialog = cls(parent)
-        try:
-            return dialog.paths if dialog.exec() == QDialog.Accepted else []
-        finally:
-            dialog.deleteLater()
+    @staticmethod
+    def choose_directory(parent=None):
+        path = QFileDialog.getExistingDirectory(parent, '添加文件夹')
+        return [path] if path else []

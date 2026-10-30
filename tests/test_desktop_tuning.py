@@ -1,4 +1,4 @@
-"""Qt regressions for fixed defaults and serial automatic processing.
+"""Qt regressions for per-image precision and serial automatic processing.
 
 Controlled workers return existing candidate pixels so these tests exercise
 event ordering and state ownership without depending on solver timing.
@@ -90,6 +90,59 @@ def expire_tuning(window):
     window._preview_tuned()
 
 
+def test_precision_is_debounced_per_image_and_reported(window, qapp, tmp_path, monkeypatch):
+    first, second = load_pair(window, qapp, tmp_path)
+    old_second = window.records[second]
+    runner = install_controlled(monkeypatch, window, count=1)
+    try:
+        window.strength_input.setValue(12)
+        window.strength_input.setValue(24)
+        assert window.strength_slider.value() == 240
+        assert window.processing_options().texture_strength == .012
+        expire_tuning(window)
+        wait_for(qapp, runner.entered[0].is_set)
+        assert runner.calls[0][0][0].path == first
+        assert runner.calls[0][1].texture_strength == .012
+        runner.release[0].set()
+        wait_for(qapp, lambda: idle(window))
+        assert window.records[first].options.texture_strength == .012
+        assert window.records[second] is old_second
+        window.table.setCurrentCell(1, 1)
+        assert window.strength_input.value() == 0
+        window.table.setCurrentCell(0, 1)
+        assert window.strength_input.value() == 24
+        wait_for(qapp, lambda: idle(window))
+        window.save_results(mode='export')
+        wait_for(qapp, lambda: idle(window))
+        report = json.loads((window._last_output / 'report.json').read_text(encoding='utf-8'))
+        assert report['parameter_mode'] == 'per_image'
+        assert [entry['parameters']['texture_strength'] for entry in report['images']] == [.012, 0]
+    finally:
+        runner.release_all()
+
+
+def test_all_precision_waits_for_explicit_batch_and_updates_each_image(window, qapp, tmp_path, monkeypatch):
+    first, second = load_pair(window, qapp, tmp_path)
+    runner = install_controlled(monkeypatch, window, count=1)
+    try:
+        window.application_scope.setCurrentIndex(window.application_scope.findData('all'))
+        window.strength_slider.setValue(480)
+        assert window.strength_input.value() == 48
+        assert window._pending_preview is None and window.worker is None
+        window.process_all()
+        wait_for(qapp, runner.entered[0].is_set)
+        assert runner.calls[0][1].texture_strength == .024
+        runner.release[0].set()
+        wait_for(qapp, lambda: idle(window))
+        assert all(item.options.texture_strength == .024 for item in window.records.values())
+        window.application_scope.setCurrentIndex(window.application_scope.findData('current'))
+        assert window.strength_input.value() == 48
+        window.table.setCurrentCell(1, 1)
+        assert window.strength_input.value() == 48
+    finally:
+        runner.release_all()
+
+
 @pytest.mark.parametrize("outcome", ["failed", "exception", "cancelled"])
 def test_unsuccessful_recompute_preserves_old_result_history_and_adoption(
         window, qapp, tmp_path, monkeypatch, outcome):
@@ -148,8 +201,9 @@ def test_unprocessed_and_empty_results_cannot_be_adopted(window, qapp, tmp_path)
     assert check.flags() & Qt.ItemIsEnabled
 
 
-def test_adoption_is_frozen_while_export_captures_existing_results(
-        window, qapp, tmp_path, monkeypatch):
+@pytest.mark.parametrize('mode', ['export', 'copy'])
+def test_adoption_is_frozen_while_saving_captures_existing_results(
+        window, qapp, tmp_path, monkeypatch, mode):
     first, second = load_pair(window, qapp, tmp_path)
     window.table.item(1, 0).setCheckState(Qt.Unchecked)
     old = window.records[first]
@@ -163,8 +217,9 @@ def test_adoption_is_frozen_while_export_captures_existing_results(
 
     monkeypatch.setattr(worker_module, "export_batch", paused_export)
     try:
-        window.save_results(mode="export")
+        window.save_results(mode=mode)
         wait_for(qapp, lambda: entered.is_set())
+        report_directory = window.worker.payload['directory']
         assert not window.output_group.isEnabled()
         assert not window.output_style.isEnabled()
         assert not window.preview.output_style_editable
@@ -183,7 +238,8 @@ def test_adoption_is_frozen_while_export_captures_existing_results(
         assert window.output_style.isEnabled()
         assert window.preview.output_style_editable
         assert window.table.item(0, 0).flags() & Qt.ItemIsEnabled
-        report = json.loads((window._last_output / "report.json").read_text())
+        report = json.loads(((report_directory if mode == 'copy' else window._last_output)
+                             / "report.json").read_text(encoding='utf-8'))
         assert [row["source"] for row in report["images"]] == [str(first)]
         assert second in window.records
     finally:

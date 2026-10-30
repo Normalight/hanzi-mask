@@ -42,7 +42,7 @@ def test_merged_background_guidance_offers_brush_cut_before_component_cleanup():
     hints = review_hints({"foreground_pixels": 80, "width": 10, "height": 10})
     assert len(hints) == 1
     assert "粘连" in hints[0] and "取消“采用”" in hints[0]
-    assert '“画笔工具”的背景色画线分割后选块清理' in hints[0]
+    assert '“画笔工具”的背景色擦除粘连处后选块清理' in hints[0]
 
 
 def test_color_and_many_components_offer_actual_cleanup_action():

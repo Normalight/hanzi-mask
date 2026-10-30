@@ -458,7 +458,7 @@ class PreviewPanel(QWidget):
             layout.addWidget(label)
             if index == 1:
                 self.mask_title = label
-                label.setToolTip("画笔：背景色画线分割，字形色填补，X 切换双色；选中色块：Ctrl/Command 多选，退格/Delete 清理；右键切换输出底色")
+                label.setToolTip("画笔：背景色擦除，字形色填补，X 切换双色；选中色块：Ctrl/Command 多选，退格/Delete 清理；右键切换输出底色")
                 canvas = MaskCanvas(self, parent=column)
             else:
                 canvas = ImageCanvas(self, placeholder="请选择图片" if index == 0 else "未处理",

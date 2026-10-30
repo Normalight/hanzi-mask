@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 
 from . import __version__
+from .cancellation import ProcessingCancelled, cancellation_scope
 from .concurrency import MAX_WORKERS, worker_limits
 from .output_style import DEFAULT_OUTPUT_STYLE, render_mask, validate_output_style
 from .processing import Options, Result, load_image, process_image
@@ -92,7 +93,7 @@ class ReplacementError(RuntimeError):
         self.rollback_errors = rollback_errors
 
 
-class _Cancelled(Exception):
+class _Cancelled(ProcessingCancelled):
     pass
 
 
@@ -301,12 +302,13 @@ def process_batch(inputs: Iterable[InputImage], options: Options,
             batch.cancelled = True
             break
         try:
-            item = process_single(source, image_options.get(source.path, options))
+            with cancellation_scope(cancel):
+                item = process_single(source, image_options.get(source.path, options))
             _cancel(cancel)
             if cache is not None:
                 item = _cache_item(item, cache, index)
             _cancel(cancel)
-        except _Cancelled:
+        except ProcessingCancelled:
             batch.cancelled = True
             break
         except (OSError, ValueError, Image.DecompressionBombError) as error:
@@ -334,7 +336,8 @@ def _process_parallel(sources: list[InputImage], options: Options,
 
     def calculate(index, source):
         _cancel(cancel)
-        item = process_single(source, image_options.get(source.path, options))
+        with cancellation_scope(cancel):
+            item = process_single(source, image_options.get(source.path, options))
         _cancel(cancel)
         if cache is not None:
             item = _cache_item(item, cache, index + 1)
@@ -368,7 +371,7 @@ def _process_parallel(sources: list[InputImage], options: Options,
                 completed += 1
                 if progress is not None:
                     progress(completed, len(sources), source.path)
-    except _Cancelled:
+    except ProcessingCancelled:
         batch.cancelled = True
     finally:
         for future in pending:
@@ -426,11 +429,14 @@ def _cache_item(item: ProcessedImage, cache: Path, index: int) -> ProcessedImage
     directory = cache / f"{index:06d}-{token}"
     directory.mkdir(exist_ok=False)
     mask_path, candidate_path = directory / "mask.png", directory / "candidate.png"
-    _atomic_write(mask_path, _png_bytes(load_mask(item)), exclusive=True)
-    _atomic_write(candidate_path, _png_bytes(item.result.candidate), exclusive=True)
+    # The fresh session directory is private until this function returns.
+    # User exports and replacement backups use durable atomic publication.
+    Image.fromarray(load_mask(item)).save(mask_path, format="PNG", compress_level=1)
+    Image.fromarray(item.result.candidate).save(candidate_path, format="PNG", compress_level=1)
     metrics = dict(item.metrics or (item.result.metrics if item.result is not None else {}))
     metrics["parameters"] = _item_parameters(item)
-    _report(directory / "metrics.json", metrics)
+    (directory / "metrics.json").write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     return ProcessedImage(item.source, None, item.source_sha256,
                           mask_path, candidate_path, metrics, options=item.options)
 
@@ -446,7 +452,12 @@ def _atomic_write(path: Path, data: bytes, exclusive: bool = False) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         if exclusive:
-            os.link(temporary, path)
+            if os.name == "nt":
+                # Windows rename fails if the destination exists and works on
+                # volumes that do not support hard links.
+                os.rename(temporary, path)
+            else:
+                os.link(temporary, path)
         else:
             os.replace(temporary, path)
     finally:
@@ -462,6 +473,38 @@ def _new_directory(path: Path) -> Path:
     directory = path.expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=False)
     return directory
+
+
+def _available_directory(path: Path) -> Path:
+    """Reserve a new folder, retaining earlier exports on repeated saves."""
+    for number in range(1, 100_001):
+        target = path if number == 1 else path.with_name(f"{path.name} ({number})")
+        try:
+            return _new_directory(target)
+        except FileExistsError:
+            continue
+    raise ValueError(f"无法创建新的保存目录：{path}")
+
+
+def _folder_targets(batch: BatchResult, requested: Path,
+                    roots: Iterable[Path | str]) -> tuple[Path, dict[Path, Path]]:
+    roots = sorted({Path(root).expanduser().resolve() for root in roots}, key=_natural)
+    groups = {}
+    for item in batch.items:
+        source = item.source.path
+        root = next((root for root in roots if root != source and source.is_relative_to(root)),
+                    source.parent)
+        groups.setdefault(root, []).append(item)
+    reserved = {root: _available_directory(requested / (root.name or '图片')) for root in groups}
+    directory = next(iter(reserved.values())) if len(reserved) == 1 else requested
+    targets = {}
+    for root, items in groups.items():
+        for item in items:
+            # scan_inputs supplies collision-safe PNG filenames, including
+            # inputs with equal stems and different source extensions.
+            relative = item.source.path.relative_to(root).with_name(item.source.relative_path.name)
+            targets[item.source.path] = reserved[root] / relative
+    return directory, targets
 
 
 def _item_parameters(item: ProcessedImage) -> dict | None:
@@ -518,36 +561,68 @@ def _validate_items(batch: BatchResult) -> None:
 
 def export_batch(batch: BatchResult, output_dir: Path | str,
                  cancel: Cancel | None = None, progress: Progress | None = None,
-                 *, output_style: str = DEFAULT_OUTPUT_STYLE) -> SaveSummary:
-    """Export original-size binary PNGs and a JSON report in a new directory.
+                 *, output_style: str = DEFAULT_OUTPUT_STYLE,
+                 layout: str = "run", roots: Iterable[Path | str] = ()) -> SaveSummary:
+    """Save original-size binary PNGs and their report with exclusive creation.
 
     Cancellation leaves completed exports and reports the partial run. Originals
     are never written. Errors are recorded per image so good results remain usable.
+    run creates images/ under a fresh directory; folders reserves one named
+    folder per input root; beside writes prefixed copies alongside each source
+    and records absolute output paths in a fresh report directory.
     """
     _validate_items(batch)
     validate_output_style(output_style)
+    if layout not in {"run", "folders", "beside"}:
+        raise ValueError("未知导出目录格式")
     requested = Path(output_dir).expanduser().resolve()
     if any(item.source.path.is_relative_to(requested) for item in batch.items):
         raise ValueError("输出目录不能是原图所在目录或其上级目录")
-    directory = _new_directory(requested)
-    summary = SaveSummary(directory, directory / "report.json")
-    report = _base_report(batch, "export", output_style)
+    if layout == "folders":
+        requested.mkdir(parents=True, exist_ok=True)
+        directory, targets = _folder_targets(batch, requested, roots)
+    else:
+        directory = _new_directory(requested)
+        targets = {item.source.path: directory / "images" / item.source.relative_path
+                   for item in batch.items}
+    report_name = ("report.json" if directory != requested or layout != "folders" else
+                   "report-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".json")
+    summary = SaveSummary(directory, directory / report_name)
+    report = _base_report(batch, "copy" if layout == "beside" else "export", output_style)
     try:
         for index, item in enumerate(batch.items, 1):
             _cancel(cancel)
-            relative = Path("images") / item.source.relative_path
+            target = targets[item.source.path]
             record = {"source": str(item.source.path), "source_sha256": item.source_sha256,
-                      "output": relative.as_posix(), "parameters": _item_parameters(item),
+                      "output": (str(item.source.path.with_name(f'副本-{item.source.path.stem}.png'))
+                                 if layout == "beside" else target.relative_to(directory).as_posix()),
+                      "parameters": _item_parameters(item),
                       "metrics": item.metrics}
             try:
+                if layout == "beside":
+                    _check_source(item)
                 data = _mask_bytes(item, output_style)
-                target = directory / relative
-                if not target.parent.resolve().is_relative_to(directory):
+                if layout != "beside" and not target.parent.resolve().is_relative_to(directory):
                     raise ValueError("输出子目录越过运行目录")
                 _cancel(cancel)
-                _atomic_write(target, data, exclusive=True)
+                if layout == "beside":
+                    source = item.source.path
+                    for number in range(1, 100_001):
+                        suffix = '' if number == 1 else f' ({number})'
+                        target = source.with_name(f'副本-{source.stem}{suffix}.png')
+                        try:
+                            _atomic_write(target, data, exclusive=True)
+                            break
+                        except FileExistsError:
+                            continue
+                    else:
+                        raise ValueError(f"无法创建副本：{source}")
+                else:
+                    _atomic_write(target, data, exclusive=True)
                 summary.outputs.append(target)
-                record.update(status="exported", output_sha256=sha256(data).hexdigest())
+                record.update(output=(str(target) if layout == "beside" else
+                                      target.relative_to(directory).as_posix()),
+                              status="exported", output_sha256=sha256(data).hexdigest())
             except _Cancelled:
                 raise
             except (OSError, ValueError) as error:
@@ -569,7 +644,7 @@ def export_batch(batch: BatchResult, output_dir: Path | str,
 
 def _check_source(item: ProcessedImage) -> None:
     if _digest(item.source.path) != item.source_sha256:
-        raise ValueError(f"原图已变化，请重新处理后再替换：{item.source.path}")
+        raise ValueError(f"原图已变化，请重新处理后再保存：{item.source.path}")
 
 
 def _rollback(entries: list[dict], directory: Path) -> list[str]:

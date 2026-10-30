@@ -1,19 +1,21 @@
 """Standalone texture client: import, preview, review and batch publication."""
 
 from dataclasses import replace
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 import sys
 import os
 import tempfile
 
+import cv2
 from PySide6.QtCore import QEvent, QRectF, QSignalBlocker, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QComboBox,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -23,20 +25,24 @@ from hanzi_mask.output_style import DEFAULT_OUTPUT_STYLE, OUTPUT_STYLES
 from hanzi_mask.processing import Options, Result
 from .canvas import PreviewPanel
 from .history_shortcuts import history_key_bindings
-from .input_dialog import ImageInputDialog
+from .input_dialog import ImageInputDialog, install_dialog_translations
 from .paths import default_output
 from .review_hints import review_hints
-from .task_worker import PreviewWorker, TaskWorker
+from .task_worker import CacheCleanupWorker, PreviewWorker, TaskWorker
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = '字形换底'
-CORRECTION_NAMES = {'brush_cut': '画笔分割', 'brush_fill': '画笔填补', 'select': '清理色块'}
+CORRECTION_NAMES = {'brush_cut': '画笔擦除', 'brush_fill': '画笔填补', 'select': '清理色块'}
 
 
 class MainWindow(QMainWindow):
     def __init__(self, initial_paths=None):
         super().__init__()
+        # Each image already has an application worker; avoid nested native
+        # pools competing with Qt for all logical CPUs during a batch.
+        cv2.setNumThreads(1)
+        install_dialog_translations(QApplication.instance())
         self.setWindowTitle(f'{APP_NAME} · {__version__}')
         self.resize(1400, 900)
         self.setAcceptDrops(True)
@@ -52,6 +58,8 @@ class MainWindow(QMainWindow):
         self._tuning_generation = 0
         self._pending_preview = None
         self._selected_preview_path = None
+        self._image_options = {}
+        self._saved_copy_paths = set()
         self._all_options = Options(method='texture', profile='balanced', texture_strength=0, keep_isolated=True,
                                     edge_refine=True, stroke_recovery=True, tip_recovery=True)
         self._processing_snapshots = {}
@@ -66,7 +74,10 @@ class MainWindow(QMainWindow):
         self._preview_request = 0
         self._displayed_preview_path = None
         self._preview_loading = False
+        self._preview_key = None
         self._closing = False
+        self._cleanup_worker = None
+        self._cache_cleaned = False
         self._last_output = None
         self._replacement_report = None
         self._cache = tempfile.TemporaryDirectory(prefix='hanzi-mask-desktop-')
@@ -93,14 +104,15 @@ class MainWindow(QMainWindow):
         source_actions = QHBoxLayout()
         self.file_buttons = []
         for index, (title, callback, shortcut) in enumerate((
-            ('添加图片或文件夹…', self.add_inputs, 'Ctrl+O'),
+            ('添加图片…', self.add_inputs, 'Ctrl+O'),
+            ('添加文件夹…', self.add_folders, None),
             ('清空列表', self.clear_inputs, None),
         )):
             button = QPushButton(title)
             button.clicked.connect(callback)
             if shortcut:
                 button.setShortcut(QKeySequence(shortcut))
-            if index == 0:
+            if index < 2:
                 button.setObjectName('primaryAction')
                 input_buttons.addWidget(button)
             else:
@@ -122,6 +134,42 @@ class MainWindow(QMainWindow):
         source_actions.addWidget(self.scan_button)
         source_layout.addLayout(source_actions)
         side.addWidget(sources)
+
+        self.parameters = QGroupBox('处理设置')
+        form = QFormLayout(self.parameters)
+        self.application_scope = QComboBox()
+        self.application_scope.addItem('当前图片', 'current')
+        self.application_scope.addItem('全部图片', 'all')
+        self.application_scope.currentIndexChanged.connect(self._scope_changed)
+        form.addRow('应用范围', self.application_scope)
+        strength_row = QWidget()
+        strength_layout = QHBoxLayout(strength_row)
+        strength_layout.setContentsMargins(0, 0, 0, 0)
+        self.strength_slider = QSlider(Qt.Horizontal)
+        self.strength_slider.setRange(0, 1000)
+        self.strength_slider.setSingleStep(10)
+        self.strength_input = QDoubleSpinBox()
+        self.strength_input.setRange(0, 100)
+        self.strength_input.setDecimals(1)
+        self.strength_input.setSuffix('%')
+        self.strength_input.setKeyboardTracking(False)
+        help_text = '向左保留更多细节，向右加强纹理平滑；0% 关闭平滑。请对照原图复核。'
+        self.strength_slider.setToolTip(help_text)
+        self.strength_input.setToolTip(help_text)
+        self.strength_slider.valueChanged.connect(lambda value: self._precision_changed(value / 10))
+        self.strength_input.valueChanged.connect(self._precision_changed)
+        strength_layout.addWidget(QLabel('处理精度'))
+        strength_layout.addStretch()
+        strength_layout.addWidget(self.strength_input)
+        form.addRow(strength_row)
+        form.addRow(self.strength_slider)
+        self.strength_reset = QPushButton('恢复默认精度')
+        self.strength_reset.clicked.connect(lambda: self._precision_changed(0))
+        form.addRow(self.strength_reset)
+        self.parameter_note = QLabel('调整后自动处理当前图片；批量处理使用各图的设置。')
+        self.parameter_note.setWordWrap(True)
+        form.addRow(self.parameter_note)
+        side.addWidget(self.parameters)
 
         process_row = QHBoxLayout()
         self.process_current_button = QPushButton('处理当前图片')
@@ -147,9 +195,9 @@ class MainWindow(QMainWindow):
         self.output_style.setMinimumContentsLength(5)
         output_form.addRow('底色', self.output_style)
         self.save_mode = QComboBox()
-        self.save_mode.addItem('原位置 · 备份', 'replace')
+        self.save_mode.addItem('原位置 · 副本', 'copy')
         self.save_mode.addItem('导出副本', 'export')
-        self.save_mode.setToolTip('保存到原位置仅支持 PNG，先备份全部原图；其他格式请选择“导出副本”。')
+        self.save_mode.setToolTip('原位置副本以“副本-”开头保存 PNG；导出副本按输入文件夹组织。')
         self.save_mode.currentIndexChanged.connect(self._save_mode_changed)
         self.save_mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.save_mode.setMinimumContentsLength(8)
@@ -173,7 +221,7 @@ class MainWindow(QMainWindow):
         self._save_mode_changed()
         side.addWidget(self.output_group)
         self.open_output_button = QPushButton('打开保存目录')
-        self.open_output_button.setToolTip('打开最近一次导出结果或原图备份所在目录。')
+        self.open_output_button.setToolTip('打开最近一次保存的图片所在目录。')
         self.open_output_button.clicked.connect(self.open_output)
         side.addWidget(self.open_output_button)
         self.check_updates_button = QPushButton('检查更新')
@@ -418,21 +466,53 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def processing_options(self):
+        source = self.current_source()
+        if self.application_scope.currentData() == 'current' and source is not None:
+            return self._options_for_image(source.path)
         return self._all_options
+
+    def _options_for_image(self, path):
+        item = self.records.get(path)
+        return self._image_options.get(path) or (item.options if item is not None else None) or self._all_options
+
+    def _sync_tuning_controls(self):
+        percent = (self.processing_options().texture_strength or 0) * 2000
+        with QSignalBlocker(self.strength_slider), QSignalBlocker(self.strength_input):
+            self.strength_slider.setValue(round(percent * 10))
+            self.strength_input.setValue(percent)
+
+    def _scope_changed(self):
+        self._discard_pending_preview()
+        self._sync_tuning_controls()
+        self.parameter_note.setText('调整后自动处理当前图片；批量处理使用各图的设置。'
+                                    if self.application_scope.currentData() == 'current' else
+                                    '设置统一精度后，点击“批量处理全部”应用。')
+
+    def _precision_changed(self, percent):
+        self._discard_pending_preview()
+        options = replace(self.processing_options(), texture_strength=round(percent / 2000, 6))
+        source = self.current_source()
+        if self.application_scope.currentData() == 'current' and source is not None:
+            self._image_options[source.path] = options
+            self._schedule_tuned_preview(recompute=True)
+        else:
+            self._all_options = options
+        self._sync_tuning_controls()
 
     def _platform_allows(self, operation):
         services = self._platform_services
         return services is None or services.permits(operation)
 
-    def _schedule_tuned_preview(self):
+    def _schedule_tuned_preview(self, *, recompute=False):
         source = self.current_source()
-        if (source is None or source.path in self.records or source.path in self.errors
+        if (source is None or (not recompute and (source.path in self.records or source.path in self.errors))
                 or self._closing or self._tuning_paused or not self._platform_allows('process')
                 or (self.worker is not None and self._task_operation not in ('scan', 'process', 'correct'))):
             return
         self._pending_preview = {
             'generation': self._tuning_generation, 'path': source.path,
             'options': self.processing_options(), 'ready': False,
+            'recompute': recompute,
         }
         self._tuning_timer.start()
         self._update_buttons()
@@ -460,7 +540,7 @@ class MainWindow(QMainWindow):
         source = self.current_source()
         return (pending is not None and pending['generation'] == self._tuning_generation
                 and source is not None and source.path == pending['path']
-                and source.path not in self.records and source.path not in self.errors
+                and (pending.get('recompute') or (source.path not in self.records and source.path not in self.errors))
                 and not self._closing and not self._tuning_paused
                 and self._platform_allows('process'))
 
@@ -494,6 +574,11 @@ class MainWindow(QMainWindow):
         if paths:
             self.import_paths(paths)
 
+    def add_folders(self):
+        paths = self._show_dialog(ImageInputDialog.choose_directory)
+        if paths:
+            self.import_paths(paths)
+
     def import_paths(self, paths, append=True):
         if self.worker or self._closing or not self._platform_allows('scan'):
             return
@@ -521,6 +606,7 @@ class MainWindow(QMainWindow):
         self.errors.clear()
         self._correction_history.clear()
         self._correction_redo.clear()
+        self._image_options.clear()
         self._selected_preview_path = None
         self.table.setRowCount(0)
         self._cancel_previews()
@@ -534,7 +620,7 @@ class MainWindow(QMainWindow):
     def rescan(self):
         if not self.roots or self.worker:
             return
-        excluded = [self._cache_root]
+        excluded = [self._cache_root, *(path for path in self._saved_copy_paths if path not in self.roots)]
         if self.output.text().strip():
             output = Path(self.output.text()).expanduser().resolve()
             if not self._output_contains_input(output):
@@ -543,6 +629,10 @@ class MainWindow(QMainWindow):
                               'exclude_paths': excluded})
 
     def _populate(self, previous=None, selected_path=None):
+        with self._table_updates():
+            self._populate_rows(previous, selected_path)
+
+    def _populate_rows(self, previous=None, selected_path=None):
         previous = previous or {}
         self.table.blockSignals(True)
         self._row_by_path = {source.path: row for row, source in enumerate(self.inputs)}
@@ -606,7 +696,10 @@ class MainWindow(QMainWindow):
             self._start_processing([source], options=self.processing_options())
 
     def process_all(self):
-        self._start_processing(self.inputs, options=self.processing_options())
+        current = self.application_scope.currentData() == 'current'
+        self._start_processing(self.inputs, options=self._all_options,
+                               per_image_options={source.path: self._options_for_image(source.path)
+                                                  for source in self.inputs} if current else None)
 
     def _row_snapshot(self, path):
         row = self._row_by_path[path]
@@ -615,6 +708,25 @@ class MainWindow(QMainWindow):
                 'size': self.table.item(row, 2).text(),
                 'state': self.table.item(row, 3).text(),
                 'note': self.table.item(row, 4).text()}
+
+    @contextmanager
+    def _table_updates(self):
+        """Size automatic columns once after a group of cell changes."""
+        if not self.table.updatesEnabled():
+            yield
+            return
+        header = self.table.horizontalHeader()
+        automatic = [column for column in range(self.table.columnCount())
+                     if header.sectionResizeMode(column) == QHeaderView.ResizeToContents]
+        self.table.setUpdatesEnabled(False)
+        for column in automatic:
+            header.setSectionResizeMode(column, QHeaderView.Fixed)
+        try:
+            yield
+        finally:
+            for column in automatic:
+                header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+            self.table.setUpdatesEnabled(True)
 
     def _restore_processing_row(self, path, error=None):
         snapshot = self._processing_snapshots[path]
@@ -647,8 +759,9 @@ class MainWindow(QMainWindow):
         self.result_options = options or self.processing_options()
         self._processing_snapshots = {source.path: self._row_snapshot(source.path) for source in sources}
         self._processing_successful = set()
-        for source in sources:
-            self._set_row(source.path, '处理中', self._processing_snapshots[source.path]['note'])
+        with self._table_updates():
+            for source in sources:
+                self._set_row(source.path, '处理中', self._processing_snapshots[source.path]['note'])
         cache = self._cache_root / f'run-{datetime.now().strftime("%Y%m%d-%H%M%S-%f")}'
         self._launch('process', {'inputs': list(sources), 'options': self.result_options,
                                  'cache_dir': cache, 'max_workers': 2,
@@ -672,13 +785,14 @@ class MainWindow(QMainWindow):
         if operation != 'correct':
             self.progress.setRange(0, 0)
         self.status.setText({'scan': '正在扫描图片…', 'process': '正在处理图片…',
-                             'export': '正在导出结果…', 'replace': '正在备份并替换…',
+                             'export': '正在导出结果…', 'copy': '正在保存原位置副本…', 'replace': '正在备份并替换…',
                              'restore': '正在恢复原始图片…', 'correct': '正在保存人工矫正…'}[operation])
         self._update_buttons()
         worker.start()
 
     def _task_event(self, worker, callback, *args):
-        if worker is not None and worker is self.worker and not self._automatic_task_obsolete():
+        if (worker is not None and worker is self.worker and not self._automatic_task_obsolete()
+                and not (self._closing and self._task_operation in ('scan', 'process', 'correct'))):
             callback(*args)
 
     @Slot(int, int, str)
@@ -712,10 +826,12 @@ class MainWindow(QMainWindow):
         row = self._row_by_path.get(path)
         if row is None:
             return
-        with QSignalBlocker(self.table):
-            self.table.item(row, 3).setText(state)
-            self.table.item(row, 4).setText(note)
-            self.table.item(row, 4).setToolTip(note)
+        with self._table_updates(), QSignalBlocker(self.table):
+            if self.table.item(row, 3).text() != state:
+                self.table.item(row, 3).setText(state)
+            if self.table.item(row, 4).text() != note:
+                self.table.item(row, 4).setText(note)
+                self.table.item(row, 4).setToolTip(note)
             if metrics:
                 self.table.item(row, 2).setText(f'{metrics["width"]} × {metrics["height"]}')
             if checked is not None:
@@ -735,6 +851,8 @@ class MainWindow(QMainWindow):
             self._correction_history.pop(path, None)
             self._correction_redo.pop(path, None)
             self.errors.pop(path, None)
+            if item.options is not None:
+                self._image_options[path] = item.options
         notes = review_hints(item.metrics, can_undo=bool(self._correction_history.get(item.source.path)))
         item = replace(item, metrics={**item.metrics, 'review_reasons': notes})
         self.records[item.source.path] = item
@@ -802,15 +920,18 @@ class MainWindow(QMainWindow):
         elif isinstance(result, SaveSummary):
             if self._platform_services is not None:
                 self._platform_services.on_saved(result)
-            self._last_output = result.output_dir
+            self._last_output = (result.outputs[0].parent if operation == 'copy' and result.outputs
+                                 else result.output_dir)
+            if operation == 'copy':
+                self._saved_copy_paths.update(result.outputs)
             if operation == 'replace':
                 self._replacement_report = result.report_path
             if operation in ('replace', 'restore'):
                 self._invalidate_results('已恢复原图' if operation == 'restore' else
                                          ('保存已取消，原图已回滚' if result.cancelled else '已换底，备份可恢复'))
-            verb = {'export': '导出', 'replace': '保存到原位置', 'restore': '恢复'}[operation]
+            verb = {'export': '导出', 'copy': '保存原位置副本', 'replace': '保存到原位置', 'restore': '恢复'}[operation]
             self.status.setText(f'{verb}{"已取消" if result.cancelled else "完成"}：{len(result.outputs)} 张成功，'
-                                f'{len(result.errors)} 张失败 · {result.output_dir}')
+                                f'{len(result.errors)} 张失败 · {self._last_output}')
             if result.errors and not self._closing:
                 details = '\n'.join(f'{error.path.name}：{error.error}' for error in result.errors[:5])
                 self._show_dialog(QMessageBox.warning, '部分结果保存失败',
@@ -848,12 +969,12 @@ class MainWindow(QMainWindow):
             worker.deleteLater()
         if self._task_operation == 'process':
             unsettled = bool(self._processing_snapshots)
-            for path in self._processing_snapshots:
+            for path in (() if self._closing else self._processing_snapshots):
                 if path not in self._processing_successful:
                     self._restore_processing_row(path)
             self._processing_snapshots.clear()
             self._processing_successful.clear()
-            if unsettled:
+            if unsettled and not self._closing:
                 self.filter_rows(preserve_editor=True)
                 self._refresh_preview()
         if self.progress.maximum() == 0:
@@ -880,6 +1001,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_previews(self):
         self._preview_request += 1
+        self._preview_key = None
         for worker in self._preview_workers:
             worker.requestInterruption()
 
@@ -892,11 +1014,18 @@ class MainWindow(QMainWindow):
             self._discard_pending_preview()
         self._refresh_preview()
         if changed:
+            self._sync_tuning_controls()
             self._schedule_tuned_preview()
 
     def _refresh_preview(self):
         source = self.current_source()
+        item = self.records.get(source.path) if source is not None else None
+        key = (source.path, id(item)) if source is not None else None
+        if (not self._closing and key is not None and key == self._preview_key
+                and self._preview_loading):
+            return
         self._cancel_previews()
+        self._preview_key = key
         if source is None or self._closing:
             self.preview.clear()
             self._displayed_preview_path = None
@@ -977,7 +1106,7 @@ class MainWindow(QMainWindow):
                                    (self.foreground_brush_button, True)):
             white = foreground != canvas.inverted
             color = '白色' if white else '黑色'
-            action = '填补' if foreground else '分割'
+            action = '填补' if foreground else '擦除'
             swatch = QPixmap(14, 14)
             swatch.fill(QColor('white' if white else 'black'))
             painter = QPainter(swatch)
@@ -1132,7 +1261,7 @@ class MainWindow(QMainWindow):
 
     def _adoption_locked(self):
         return self._closing or (self.worker is not None
-                                 and self._task_operation in ('export', 'replace', 'restore'))
+                                 and self._task_operation in ('export', 'copy', 'replace', 'restore'))
 
     def _can_adopt(self, path):
         item = self.records.get(path)
@@ -1144,7 +1273,8 @@ class MainWindow(QMainWindow):
         if (not self._adoption_locked()
                 and (self._can_adopt(self.inputs[row].path) or check.checkState() == Qt.Checked)):
             flags |= Qt.ItemIsEnabled
-        check.setFlags(flags)
+        if check.flags() != flags:
+            check.setFlags(flags)
 
     def _remember_correction_adoption(self, path, checked):
         if (self.worker is not None and self._task_operation == 'correct'
@@ -1170,7 +1300,7 @@ class MainWindow(QMainWindow):
     def check_all(self, checked):
         if self._adoption_locked() or not self._platform_allows('correct'):
             return
-        with QSignalBlocker(self.table):
+        with self._table_updates(), QSignalBlocker(self.table):
             for row, source in enumerate(self.inputs):
                 if not self.table.isRowHidden(row):
                     adopt = checked and self._can_adopt(source.path)
@@ -1185,14 +1315,14 @@ class MainWindow(QMainWindow):
 
     def choose_output(self):
         self._tuning_timer.stop()
-        path = self._show_dialog(QFileDialog.getExistingDirectory, '选择结果或备份保存目录', self.output.text())
+        path = self._show_dialog(QFileDialog.getExistingDirectory, '选择保存目录', self.output.text())
         if path:
             self.output.setText(path)
 
     def _save_mode_changed(self):
-        replace = self.save_mode.currentData() == 'replace'
-        self.output_label.setText('备份目录' if replace else '保存目录')
-        self.save_button.setText('保存到原位置' if replace else '导出采用项')
+        beside = self.save_mode.currentData() == 'copy'
+        self.output_label.setText('记录目录' if beside else '保存目录')
+        self.save_button.setText('保存原位置副本' if beside else '导出采用项')
 
     def _output_style_changed(self):
         self.preview.set_output_style(self.output_style.currentData())
@@ -1213,7 +1343,7 @@ class MainWindow(QMainWindow):
         if not items:
             return False
         if not self.output.text().strip():
-            self._show_dialog(QMessageBox.warning, '选择保存目录', '请选择结果或备份保存目录。')
+            self._show_dialog(QMessageBox.warning, '选择保存目录', '请选择结果或保存记录的目录。')
             return False
         output = Path(self.output.text()).expanduser().resolve()
         if self._output_contains_input(output):
@@ -1221,8 +1351,8 @@ class MainWindow(QMainWindow):
                               '保存目录不能与输入目录相同或包含输入路径。请选择独立目录或输入目录中的子文件夹。')
             return False
         mode = self.save_mode.currentData() if mode is None else mode
-        if mode not in ('export', 'replace'):
-            raise ValueError('保存方式必须为导出或替换')
+        if mode not in ('export', 'copy', 'replace'):
+            raise ValueError('未知保存方式')
         if not self._platform_allows(mode):
             return False
         output_style = self.output_style.currentData()
@@ -1236,10 +1366,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
                 return False
-        directory = output / (
-            ('备份-' if mode == 'replace' else '结果-') + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
+        directory = (output if mode == 'export' else output / (
+            ('备份-' if mode == 'replace' else '保存记录-') + datetime.now().strftime('%Y%m%d-%H%M%S-%f')))
         batch = BatchResult(self.result_options, items)
-        self._launch(mode, {'batch': batch, 'directory': directory, 'output_style': output_style})
+        self._launch(mode, {'batch': batch, 'directory': directory, 'output_style': output_style,
+                            'layout': 'folders' if mode == 'export' else 'beside', 'roots': list(self.roots)})
         return self.worker is not None
 
     def choose_restore(self):
@@ -1279,6 +1410,8 @@ class MainWindow(QMainWindow):
         for widget in (self.root_list, self.scan_button):
             widget.setEnabled(not busy)
         self.output_group.setEnabled(editable_settings)
+        self.parameters.setEnabled(not self._closing and (self.worker is None or
+                                   (self._task_operation == 'process' and self.worker.payload.get('automatic'))))
         self.process_all_button.setEnabled(not busy and bool(self.inputs))
         self.process_current_button.setEnabled(not busy and self.current_source() is not None)
         count = 0 if busy else len(self.adopted_items())
@@ -1290,7 +1423,7 @@ class MainWindow(QMainWindow):
             self._adoption_controls_locked = adoption_locked
             self._frozen_adoption = ({source.path: self.table.item(row, 0).checkState()
                                      for row, source in enumerate(self.inputs)} if adoption_locked else {})
-            with QSignalBlocker(self.table):
+            with self._table_updates(), QSignalBlocker(self.table):
                 for row in range(len(self.inputs)):
                     self._update_adoption_cell(row)
         for button in self.adoption_buttons:
@@ -1327,7 +1460,7 @@ class MainWindow(QMainWindow):
         if self._platform_services is not None and not self._platform_services.before_close(event):
             return
         self._discard_pending_preview(cancel_running=False)
-        if self.worker or self._preview_workers:
+        if self.worker or self._preview_workers or self._cleanup_worker is not None:
             self._closing = True
             if self.worker and self._task_operation != 'restore':
                 self.worker.requestInterruption()
@@ -1337,8 +1470,29 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._closing = True
-        self._cache.cleanup()
-        event.accept()
+        if self._cache_cleaned:
+            event.accept()
+        else:
+            self.status.setText('正在清理临时缓存…')
+            self._update_buttons()
+            self._cleanup_worker = CacheCleanupWorker(self._cache, self)
+            self._cleanup_worker.failed.connect(self._cache_cleanup_failed, Qt.QueuedConnection)
+            self._cleanup_worker.finished.connect(self._cache_cleanup_finished, Qt.QueuedConnection)
+            self._cleanup_worker.start()
+            event.ignore()
+
+    @Slot(str)
+    def _cache_cleanup_failed(self, message):
+        import logging
+        logging.getLogger(__name__).warning('临时缓存清理失败：%s', message)
+
+    @Slot()
+    def _cache_cleanup_finished(self):
+        worker = self._cleanup_worker
+        self._cleanup_worker = None
+        self._cache_cleaned = True
+        worker.deleteLater()
+        self.close()
 
     def _finish_close(self):
         if self._closing and self.worker is None and not self._preview_workers:

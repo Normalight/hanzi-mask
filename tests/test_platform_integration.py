@@ -256,7 +256,7 @@ def test_wrong_product_is_rejected_before_loading_sdks(bridge, monkeypatch, prod
     assert window._platform_services is previous
 
 
-@pytest.mark.parametrize('operation', ['scan', 'process', 'correct', 'export', 'replace', 'restore'])
+@pytest.mark.parametrize('operation', ['scan', 'process', 'correct', 'export', 'copy', 'replace', 'restore'])
 def test_locked_gate_allows_only_preserved_export(bridge, operation):
     _, services = bridge
     assert services.permits(operation)
@@ -264,7 +264,7 @@ def test_locked_gate_allows_only_preserved_export(bridge, operation):
     assert services.permits(operation) == (operation == 'export')
 
 
-@pytest.mark.parametrize('operation', ['scan', 'process', 'correct', 'export', 'replace', 'restore'])
+@pytest.mark.parametrize('operation', ['scan', 'process', 'correct', 'export', 'copy', 'replace', 'restore'])
 def test_lock_preserves_cached_work_and_does_not_interrupt_save_transactions(bridge, operation):
     window, services = bridge
     records = dict(window.records)
@@ -304,7 +304,7 @@ def test_rescue_export_busy_request_is_coalesced_and_deferred(bridge, qapp):
     assert window.cache_file.is_file()
 
 
-@pytest.mark.parametrize('operation', ['export', 'replace', 'restore'])
+@pytest.mark.parametrize('operation', ['export', 'copy', 'replace', 'restore'])
 def test_busy_rescue_leaves_safe_save_running(bridge, qapp, operation):
     window, services = bridge
     worker = window.worker = FakeWorker()
@@ -341,7 +341,7 @@ def test_rescue_request_does_not_restart_work_after_window_is_closing(bridge, qa
     assert not window.save_modes
 
 
-@pytest.mark.parametrize('operation', ['scan', 'process', 'correct', 'export', 'replace', 'restore', 'preview'])
+@pytest.mark.parametrize('operation', ['scan', 'process', 'correct', 'export', 'copy', 'replace', 'restore', 'preview'])
 def test_update_rejects_unrelated_busy_work_without_cancelling_it(bridge, operation):
     window, services = bridge
     if operation == 'preview':
@@ -590,7 +590,7 @@ assert windows[0]._platform_services is None
 
 def test_real_window_lock_gates_work_but_preserves_explicit_and_clicked_export(
         window, qapp, tmp_path):
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     path = write_two_components(tmp_path / 'input' / 'glyph.png')
     originals = path.read_bytes()
     import_and_process(window, qapp, path)
@@ -622,8 +622,8 @@ def test_real_window_lock_gates_work_but_preserves_explicit_and_clicked_export(
     assert window.save_results(mode='export') is True
     wait_for(qapp, lambda: idle(window))
     first_export = window._last_output
-    assert len(list((first_export / 'images').rglob('*.png'))) == 1
-    assert window.save_mode.currentData() == 'replace'
+    assert len(list(first_export.rglob('*.png'))) == 1
+    assert window.save_mode.currentData() == 'copy'
     assert path.read_bytes() == originals
     # QPushButton.clicked has a bool argument; the keyword-only mode entry
     # must still work through the actual signal connection.
@@ -633,7 +633,7 @@ def test_real_window_lock_gates_work_but_preserves_explicit_and_clicked_export(
     assert window.worker is not None
     wait_for(qapp, lambda: idle(window))
     assert window._last_output != first_export
-    assert len(list((window._last_output / 'images').rglob('*.png'))) == 1
+    assert len(list(window._last_output.rglob('*.png'))) == 1
     assert path.read_bytes() == originals
     assert not window._test_messages
 
@@ -641,7 +641,7 @@ def test_real_window_lock_gates_work_but_preserves_explicit_and_clicked_export(
 @pytest.mark.parametrize('suffix', ['png', 'jpg'])
 def test_real_lock_rescue_forces_copy_export_when_default_saves_in_place(
         window, qapp, tmp_path, monkeypatch, suffix):
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     path = write_two_components(tmp_path / 'input' / f'glyph.{suffix}')
     original_bytes = path.read_bytes()
     import_and_process(window, qapp, path)
@@ -662,13 +662,36 @@ def test_real_lock_rescue_forces_copy_export_when_default_saves_in_place(
     services.export_preserved_results()
     assert window.worker is not None and window._task_operation == 'export'
     wait_for(qapp, lambda: idle(window))
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     assert window.records[path] is previous
     assert previous.mask_path.is_file()
     assert path.read_bytes() == original_bytes
-    assert len(list((window._last_output / 'images').rglob('*.png'))) == 1
+    assert len(list(window._last_output.rglob('*.png'))) == 1
     assert (window._last_output / 'report.json').is_file()
     assert window._replacement_report is None
+    assert not window._test_messages
+
+
+@pytest.mark.parametrize('source_state', ['changed', 'missing'])
+def test_real_lock_rescues_cached_result_after_source_changes(window, qapp, tmp_path, source_state):
+    path = write_two_components(tmp_path / 'input' / 'glyph.png')
+    import_and_process(window, qapp, path)
+    previous = window.records[path]
+    if source_state == 'missing':
+        path.unlink()
+    else:
+        path.write_bytes(b'changed source')
+    services = PlatformServices(window)
+    services.guard = FakeGuard()
+    services.updater = FakeUpdater(window)
+    window._platform_services = services
+    services.guard.locked = True
+    services.lock_session()
+    services.export_preserved_results()
+    wait_for(qapp, lambda: idle(window))
+    assert window.records[path] is previous
+    assert len(list(window._last_output.rglob('*.png'))) == 1
+    assert (window._last_output / 'report.json').is_file()
     assert not window._test_messages
 
 
@@ -733,7 +756,8 @@ def test_real_idle_close_prevents_already_queued_rescue_export_from_using_delete
     services._schedule_dispatch()
     assert services._dispatch_scheduled
     assert exports == []
-    assert window.close()
+    window.close()
+    wait_for(qapp, lambda: not window.isVisible())
     assert window._closing
     assert not cache.exists()
     qapp.processEvents()
@@ -747,7 +771,7 @@ def test_real_idle_close_prevents_already_queued_rescue_export_from_using_delete
 
 def test_real_native_close_probe_keeps_window_open_and_cache_until_final_close(
         window, qapp, tmp_path):
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     path = write_rubbing(tmp_path / 'input' / 'glyph.png')
     original = path.read_bytes()
     import_and_process(window, qapp, path)
@@ -765,9 +789,10 @@ def test_real_native_close_probe_keeps_window_open_and_cache_until_final_close(
     assert cache.is_dir()
     assert window.records[path].mask_path.is_file()
     assert services._update_save_ready
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     assert path.read_bytes() == original
-    assert window.close()
+    window.close()
+    wait_for(qapp, lambda: not window.isVisible())
     assert window._closing
     assert not window.isVisible()
     assert not cache.exists()

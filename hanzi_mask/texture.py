@@ -10,6 +10,7 @@ import numpy as np
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 
+from .cancellation import check_cancelled
 
 TEXTURE_PROFILES = {
     # regularization strength, threshold bias, opening radius / short side
@@ -57,6 +58,7 @@ def smooth_texture(
     h, w = structure.shape
     sigma = max(0.5, scale * ratio)
     for _ in range(iterations):
+        check_cancelled()
         dx = np.diff(structure, axis=1, append=structure[:, -1:])
         dy = np.diff(structure, axis=0, append=structure[-1:, :])
         local_weight = 1.0 / np.maximum(np.hypot(dx, dy), 0.01)
@@ -81,6 +83,7 @@ def smooth_texture(
             [0, 1, -1, w, -w], shape=(h * w, h * w), format="csc",
         )
         structure = spsolve(system, original.ravel()).reshape(h, w)
+        check_cancelled()
         if not np.all(np.isfinite(structure)):
             raise ValueError("纹理分离求解失败")
         sigma = max(sigma / 2.0, 0.5)

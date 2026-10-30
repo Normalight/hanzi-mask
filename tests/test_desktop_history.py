@@ -50,7 +50,7 @@ def test_history_labels_jump_undo_redo_and_export_current_state(window, qapp, tm
     brush(window, qapp, (44, 20), (54, 20), fill=True)
     states.append(load_mask(window.records[path]).copy())
     assert window.history_list.count() == 4
-    for row, label in enumerate(('初始处理结果', '画笔分割', '清理色块', '画笔填补')):
+    for row, label in enumerate(('初始处理结果', '画笔擦除', '清理色块', '画笔填补')):
         assert label in window.history_list.item(row).text()
     assert window.history_list.currentRow() == 3
 
@@ -70,7 +70,7 @@ def test_history_labels_jump_undo_redo_and_export_current_state(window, qapp, tm
     window.save_mode.setCurrentIndex(window.save_mode.findData('export'))
     window.save_results()
     wait_for(qapp, lambda: idle(window))
-    image_path = next((window._last_output / 'images').rglob('*.png'))
+    image_path = next(window._last_output.rglob('*.png'))
     with Image.open(image_path) as image:
         np.testing.assert_array_equal(np.asarray(image), 255 - states[2])
     report = json.loads((window._last_output / 'report.json').read_text())

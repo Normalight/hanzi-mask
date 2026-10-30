@@ -136,7 +136,7 @@ def test_standalone_launch_and_recursive_import(window, qapp, tmp_path):
     second = write_rubbing(tmp_path / "examples" / "水" / "wide.png", (83, 65))
     assert window.isVisible()
     assert '字形换底' in window.windowTitle()
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     assert window.output_style.currentData() == 'black-on-white'
     assert window.preview.output_style == 'black-on-white'
     options = window.processing_options()
@@ -173,6 +173,13 @@ assert 'hanzi_auth' not in sys.modules
 assert 'hanzi_update' not in sys.modules
 assert 'torch' not in sys.modules
 window.close()
+from PySide6.QtTest import QTest
+for _ in range(1000):
+    app.processEvents()
+    if not window.isVisible():
+        break
+    QTest.qWait(1)
+assert not window.isVisible()
 window.deleteLater()
 QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 app.processEvents()
@@ -197,9 +204,9 @@ def test_background_processing_review_and_export_only_adopted(window, qapp, tmp_
     wait_for(qapp, lambda: idle(window))
     output = window._last_output
     report = json.loads((output / "report.json").read_text())
-    exported = list((output / "images").rglob("*.png"))
+    exported = list(output.rglob("*.png"))
     assert len(exported) == 1
-    assert exported[0].relative_to(output / "images") == adopted.relative_path
+    assert exported[0].relative_to(output) == adopted.relative_path
     assert report["summary"]["exported"] == 1
     assert report["images"][0]["source"] == str(adopted.path)
     with Image.open(exported[0]) as image:
@@ -284,7 +291,7 @@ def test_component_cleanup_updates_only_cached_mask_supports_undo_and_exports_co
     window.save_mode.setCurrentIndex(window.save_mode.findData('export'))
     window.save_results()
     wait_for(qapp, lambda: idle(window))
-    exported = list((window._last_output / "images").rglob("*.png"))
+    exported = list(window._last_output.rglob("*.png"))
     assert len(exported) == 1
     with Image.open(exported[0]) as image:
         assert image.size == (96, 80)
@@ -551,7 +558,7 @@ def test_export_partial_failure_preserves_successes_and_reports_failure_count(
     report = json.loads((output / "report.json").read_text())
     assert report["summary"]["exported"] == 1
     assert report["summary"]["errors"] == 1
-    assert len(list((output / "images").rglob("*.png"))) == 1
+    assert len(list(output.rglob("*.png"))) == 1
     assert {row["status"] for row in report["images"]} == {"exported", "error"}
     assert re.search(r"(?:失败[：:\s]*1|1\s*张?\s*失败)", window.status.text())
     assert all(path.read_bytes() == originals[path] for path in (first, second))
@@ -603,7 +610,7 @@ def test_replacement_requires_confirmation_backs_up_then_restores_original_bytes
     import_and_process(window, qapp, path)
     mask = batch_module.load_mask(window.records[path]).copy()
     window.output_style.setCurrentIndex(window.output_style.findData(output_style))
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     assert '原位置' in window.save_button.text()
     calls = []
 
@@ -613,13 +620,13 @@ def test_replacement_requires_confirmation_backs_up_then_restores_original_bytes
         return QMessageBox.No
 
     monkeypatch.setattr(QMessageBox, "question", refuse)
-    window.save_button.click()
+    window.save_results(mode='replace')
     assert window.worker is None
     assert path.read_bytes() == original
     assert window._replacement_report is None
     assert calls == ['保存到原位置']
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
-    window.save_button.click()
+    window.save_results(mode='replace')
     wait_for(qapp, lambda: idle(window))
     report_path = window._replacement_report
     report = json.loads(report_path.read_text())
@@ -654,7 +661,7 @@ def test_save_rejects_directory_that_contains_import_root(
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     before = set(tmp_path.rglob("*"))
 
-    window.save_results()
+    window.save_results(mode=mode)
 
     assert window.worker is None
     assert window._last_output is None
@@ -669,10 +676,10 @@ def test_failed_mutating_task_invalidates_reviewed_results_and_preserves_recover
         window, qapp, tmp_path, monkeypatch, operation):
     path = write_rubbing(tmp_path / "input" / "crop.png")
     import_and_process(window, qapp, path)
-    assert window.save_mode.currentData() == 'replace'
+    assert window.save_mode.currentData() == 'copy'
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     if operation == "restore":
-        window.save_results()
+        window.save_results(mode='replace')
         wait_for(qapp, lambda: idle(window))
         # Review the replaced file so failure of recovery must invalidate that
         # specific processed state, even if disk bytes have already changed.
@@ -689,7 +696,7 @@ def test_failed_mutating_task_invalidates_reviewed_results_and_preserves_recover
                         "replace_originals" if operation == "replace" else "restore_replacement",
                         fail_after_disk_change)
     if operation == "replace":
-        window.save_results()
+        window.save_results(mode='replace')
     else:
         window.restore_last()
     wait_for(qapp, lambda: idle(window))

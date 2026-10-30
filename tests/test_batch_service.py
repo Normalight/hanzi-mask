@@ -1,6 +1,8 @@
 from dataclasses import replace
+
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import threading
 
@@ -9,6 +11,7 @@ from PIL import Image, PngImagePlugin
 import pytest
 
 from hanzi_mask import batch_service as service
+from hanzi_mask.cancellation import ProcessingCancelled, cancellation_scope, check_cancelled
 from hanzi_mask.concurrency import WorkerLimits
 from hanzi_mask.processing import Options
 
@@ -39,6 +42,173 @@ def batch_for(tmp_path, options, count=2, cached=False):
 
 def read_report(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize('style', ['black-on-white', 'white-on-black'])
+def test_beside_copies_preserve_sources_and_prior_copies(tmp_path, options, style):
+    files = [make_image(tmp_path / 'source' / name) for name in ('字.png', '字.jpg')]
+    before = {path: path.read_bytes() for path in files}
+    sources = service.scan_inputs(files)
+    batch = service.process_batch(sources, options, cache_dir=tmp_path / 'cache')
+    occupied = files[0].with_name('副本-字.png')
+    occupied.write_bytes(b'existing copy')
+    first = service.export_batch(batch, tmp_path / 'records-1', layout='beside', output_style=style)
+    second = service.export_batch(batch, tmp_path / 'records-2', layout='beside', output_style=style)
+    assert occupied.read_bytes() == b'existing copy'
+    assert len(set(first.outputs + second.outputs)) == 4
+    assert all(path.parent == files[0].parent and path.name.startswith('副本-字')
+               for path in first.outputs + second.outputs)
+    assert all(path.read_bytes() == before[path] for path in files)
+    for output, item in zip(first.outputs, batch.items):
+        with Image.open(output) as image:
+            expected = service.load_mask(item)
+            np.testing.assert_array_equal(np.asarray(image), expected if style == 'white-on-black' else 255 - expected)
+    report = read_report(first.report_path)
+    assert report['operation'] == 'copy'
+    assert report['output_style'] == style
+    assert report['images'][0]['parameters'] == options.to_dict()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows rename provides exclusive publication')
+def test_windows_copy_save_works_without_hardlinks_and_retains_existing_files(tmp_path, options, monkeypatch):
+    files, batch = batch_for(tmp_path, options, count=1, cached=True)
+    occupied = files[0].with_name('副本-glyph-0.png')
+    occupied.write_bytes(b'existing copy')
+
+    def no_hardlinks(*args, **kwargs):
+        raise OSError('hard links unavailable')
+
+    monkeypatch.setattr(service.os, 'link', no_hardlinks)
+    first = service.export_batch(batch, tmp_path / 'records-1', layout='beside')
+    second = service.export_batch(batch, tmp_path / 'records-2', layout='beside')
+    assert not first.errors and not second.errors
+    assert occupied.read_bytes() == b'existing copy'
+    assert first.outputs[0] != second.outputs[0]
+    assert all(path.is_file() for path in first.outputs + second.outputs)
+
+
+def test_folder_export_preserves_hierarchy_and_repeated_saves(tmp_path, options):
+    root = tmp_path / 'input' / '拓片'
+    files = [make_image(root / 'a.png'), make_image(root / 'nested' / 'b.jpg')]
+    batch = service.process_batch(service.scan_inputs([root], recursive=True), options)
+    output = tmp_path / 'saved'
+    first = service.export_batch(batch, output, layout='folders', roots=[root])
+    before = {path: path.read_bytes() for path in first.outputs}
+    second = service.export_batch(batch, output, layout='folders', roots=[root])
+    assert first.output_dir == output / '拓片'
+    assert {path.relative_to(first.output_dir).as_posix() for path in first.outputs} == {'a.png', 'nested/b.png'}
+    assert first.report_path == first.output_dir / 'report.json'
+    assert second.output_dir == output / '拓片 (2)'
+    assert all(path.read_bytes() == data for path, data in before.items())
+    assert all(path.is_file() for path in files)
+
+
+@pytest.mark.parametrize('source_state', ['changed', 'missing'])
+@pytest.mark.parametrize('layout', ['run', 'folders'])
+def test_export_preserves_cached_result_when_source_changes(tmp_path, options, source_state, layout):
+    files, batch = batch_for(tmp_path, options, count=1, cached=True)
+    expected = service.load_mask(batch.items[0]).copy()
+    if source_state == 'missing':
+        files[0].unlink()
+    else:
+        files[0].write_bytes(b'new source content')
+    summary = service.export_batch(batch, tmp_path / 'export', layout=layout, roots=[files[0].parent])
+    assert not summary.errors and len(summary.outputs) == 1
+    with Image.open(summary.outputs[0]) as image:
+        np.testing.assert_array_equal(np.asarray(image), 255 - expected)
+    assert read_report(summary.report_path)['images'][0]['source_sha256'] == batch.items[0].source_sha256
+
+
+@pytest.mark.parametrize('source_state', ['changed', 'missing'])
+def test_beside_copy_rejects_changed_or_missing_source(tmp_path, options, source_state):
+    files, batch = batch_for(tmp_path, options, count=1, cached=True)
+    if source_state == 'missing':
+        files[0].unlink()
+    else:
+        files[0].write_bytes(b'new source content')
+    summary = service.export_batch(batch, tmp_path / 'records', layout='beside')
+    assert not summary.outputs and len(summary.errors) == 1
+    assert not list(files[0].parent.glob('副本-*.png'))
+
+
+def test_export_preserves_root_hierarchy_if_input_directory_moved(tmp_path, options):
+    root = tmp_path / 'input' / '拓片'
+    make_image(root / 'a.png')
+    make_image(root / 'nested' / 'b.png')
+    batch = service.process_batch(service.scan_inputs([root], recursive=True), options,
+                                  cache_dir=tmp_path / 'cache')
+    root.rename(tmp_path / 'moved')
+    summary = service.export_batch(batch, tmp_path / 'saved', layout='folders', roots=[root])
+    assert not summary.errors
+    assert summary.output_dir.name == '拓片'
+    assert {path.relative_to(summary.output_dir).as_posix() for path in summary.outputs} == {'a.png', 'nested/b.png'}
+
+
+def test_multiple_roots_with_equal_names_export_to_distinct_folders(tmp_path, options):
+    roots = [tmp_path / name / '拓片' for name in ('one', 'two')]
+    for root in roots:
+        make_image(root / 'glyph.png')
+    batch = service.process_batch(service.scan_inputs(roots, recursive=True), options)
+    summary = service.export_batch(batch, tmp_path / 'saved', layout='folders', roots=roots)
+    assert len(summary.outputs) == 2
+    assert {path.parent.name for path in summary.outputs} == {'拓片', '拓片 (2)'}
+    assert summary.report_path.is_file()
+    assert all((summary.output_dir / entry['output']).is_file()
+               for entry in read_report(summary.report_path)['images'])
+
+
+@pytest.mark.parametrize('workers', [1, 2])
+def test_processing_checkpoints_cancel_without_publishing(tmp_path, options, monkeypatch, workers):
+    files = [make_image(tmp_path / f'{number}.png') for number in range(3)]
+    stop = threading.Event()
+    calls = []
+
+    def interruptible(source, opts):
+        calls.append(source.path)
+        stop.set()
+        check_cancelled()
+        pytest.fail('Cancelled image continued processing')
+
+    monkeypatch.setattr(service, 'process_single', interruptible)
+    published = []
+    result = service.process_batch(service.scan_inputs(files), options, cancel=stop.is_set,
+                                   processed=published.append, max_workers=workers)
+    assert result.cancelled and not result.items and not result.errors
+    assert not published and len(calls) <= workers
+    # The worker's scoped callback must not affect an independent CLI call.
+    check_cancelled()
+
+
+def test_transient_cache_writes_do_not_sync_disk(tmp_path, options, monkeypatch):
+    sources = service.scan_inputs([make_image(tmp_path / 'source.png')])
+    syncs = []
+    monkeypatch.setattr(service.os, 'fsync', lambda *args: syncs.append(args))
+    batch = service.process_batch(sources, options, cache_dir=tmp_path / 'cache')
+    assert not syncs
+    assert service.load_result(batch.items[0]).mask.shape == (23, 31)
+    service.export_batch(batch, tmp_path / 'export')
+    assert syncs
+
+
+def test_texture_cancel_stops_after_current_native_solve(monkeypatch):
+    from hanzi_mask import texture
+
+    stop = threading.Event()
+    calls = []
+    solve = texture.spsolve
+
+    def interrupted_solve(*args, **kwargs):
+        calls.append(True)
+        result = solve(*args, **kwargs)
+        stop.set()
+        return result
+
+    monkeypatch.setattr(texture, 'spsolve', interrupted_solve)
+    pixels = np.tile(np.arange(32, dtype=np.uint8), (24, 1))
+    with cancellation_scope(stop.is_set), pytest.raises(ProcessingCancelled):
+        texture.smooth_texture(pixels, .012)
+    assert len(calls) == 1
+    check_cancelled()
 
 
 def test_scan_stable_recursive_dedup_and_relative_paths(tmp_path):

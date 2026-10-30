@@ -9,6 +9,7 @@ conservative evidence, not semantic recognition of a calligraphic stroke.
 import cv2
 import numpy as np
 
+from .cancellation import check_cancelled
 from .edge_refinement import _RING, _binary_mask, _simple_pattern, _topology
 
 
@@ -238,6 +239,7 @@ def preserve_tips(mask: np.ndarray, raw_signal: np.ndarray, *,
 
     height, width = mask.shape
     for region in region_ids:
+        check_cancelled()
         x, y, w, h, _ = stats[region]
         # Include the core's one-pixel bridge and its accepted body contact.
         padding = reach + 2
@@ -309,7 +311,9 @@ def preserve_tips(mask: np.ndarray, raw_signal: np.ndarray, *,
     del labels, owners, source_width, source_position, evidence, extension, raw_bright, core
     current = np.pad(foreground.astype(np.uint8), 1)
     rejected_pixels = 0
-    for index in order:
+    for step, index in enumerate(order):
+        if step % 256 == 0:
+            check_cancelled()
         row, column = coordinates[index]
         cy, cx = int(row) + 1, int(column) + 1
         pattern = 0

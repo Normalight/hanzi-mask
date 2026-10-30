@@ -1,54 +1,53 @@
-"""Exercise the actual mixed picker selection and its confirmation button."""
-
-from pathlib import Path
+"""Native picker dispatch, cancellation, and recursive import regressions."""
 
 import pytest
 
 pytest.importorskip('PySide6')
-from PySide6.QtCore import QItemSelectionModel, Qt
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QListView, QTreeView
+from PySide6.QtWidgets import QFileDialog
 
-from ui.input_dialog import ImageInputDialog
+from ui.input_dialog import ImageInputDialog, install_dialog_translations
 from test_desktop import idle, qapp, wait_for, window, write_rubbing
 
 
-@pytest.mark.parametrize('view_mode,view_type,name', [
-    (QFileDialog.Detail, QTreeView, 'treeView'),
-    (QFileDialog.List, QListView, 'listView'),
-])
-@pytest.mark.parametrize('selection', [('folder',), ('a.png',), ('folder', 'a.png', 'b.jpg')])
-def test_picker_accepts_files_folders_and_mixed_selection(qapp, tmp_path, view_mode, view_type, name, selection):
-    (tmp_path / 'folder').mkdir()
-    for filename in ('a.png', 'b.jpg'):
-        write_rubbing(tmp_path / filename)
-    dialog = ImageInputDialog()
-    dialog.setDirectory(str(tmp_path))
-    dialog.setViewMode(view_mode)
-    dialog.show()
-    try:
-        view = dialog.findChild(view_type, name)
-        model = view.model()
-        wait_for(qapp, lambda: model.rowCount(view.rootIndex()) >= 3)
-        for filename in selection:
-            index = model.index(str(tmp_path / filename))
-            view.selectionModel().select(index, QItemSelectionModel.Select | QItemSelectionModel.Rows)
-        box = dialog.findChild(QDialogButtonBox)
-        button = next(button for button in box.buttons() if box.buttonRole(button) == QDialogButtonBox.AcceptRole)
-        QTest.mouseClick(button, Qt.LeftButton)
-        assert dialog.result() == QDialog.Accepted
-        assert {Path(path).resolve() for path in dialog.paths} == {(tmp_path / name).resolve() for name in selection}
-    finally:
-        dialog.close()
-        dialog.deleteLater()
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_native_image_picker_imports_multiple_files(window, qapp, tmp_path, monkeypatch, cancelled):
+    paths = [write_rubbing(tmp_path / name) for name in ('a.png', 'b.jpg')]
 
+    def choose(parent, caption, directory, filters):
+        assert parent is window
+        assert caption == '添加图片'
+        assert '*.png' in filters and '*.tiff' in filters
+        assert window._tuning_paused == 1
+        return ([] if cancelled else [str(path) for path in paths]), filters
 
-def test_merged_input_button_imports_nested_folders_and_files(window, qapp, tmp_path, monkeypatch):
-    first = write_rubbing(tmp_path / 'folder' / 'nested' / 'a.png')
-    second = write_rubbing(tmp_path / 'b.png')
-    monkeypatch.setattr(ImageInputDialog, 'choose', lambda parent: [str(first.parent.parent), str(second), str(second)])
+    # The common Qt API dispatches to the installed Windows, Cocoa or Linux
+    # platform helper with its default native options.
+    monkeypatch.setattr(QFileDialog, 'getOpenFileNames', choose)
     window.file_buttons[0].click()
     wait_for(qapp, lambda: idle(window))
-    assert {item.path for item in window.inputs} == {first, second}
-    assert len(window.roots) == 2
-    assert window.records[window.current_source().path].options.texture_strength == 0
+    assert {item.path for item in window.inputs} == (set() if cancelled else set(paths))
+    assert window._tuning_paused == 0
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_native_folder_picker_appends_and_scans_recursively(window, qapp, tmp_path, monkeypatch, cancelled):
+    first = write_rubbing(tmp_path / 'first' / 'a.png')
+    second = write_rubbing(tmp_path / 'folder' / 'nested' / 'b.png')
+    window.import_paths([first])
+    wait_for(qapp, lambda: idle(window))
+
+    def choose(parent, caption):
+        assert parent is window and caption == '添加文件夹'
+        assert window._tuning_paused == 1
+        return '' if cancelled else str(second.parent.parent)
+
+    monkeypatch.setattr(QFileDialog, 'getExistingDirectory', choose)
+    window.file_buttons[1].click()
+    wait_for(qapp, lambda: idle(window))
+    assert {item.path for item in window.inputs} == ({first} if cancelled else {first, second})
+    assert window._tuning_paused == 0
+
+
+def test_qt_fallback_translation(qapp):
+    assert install_dialog_translations(qapp)
+    assert '文件' in qapp.translate('QFileDialog', 'File &name:')

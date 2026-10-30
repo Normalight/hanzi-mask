@@ -38,9 +38,10 @@ class TaskWorker(QThread):
                                        progress, p["cache_dir"], self.item_ready.emit,
                                        max_workers=p.get("max_workers"),
                                        per_image_options=p.get("per_image_options"))
-            elif self.operation == "export":
+            elif self.operation in ("export", "copy"):
                 result = export_batch(p["batch"], p["directory"], self.isInterruptionRequested, progress,
-                                      output_style=p.get("output_style", DEFAULT_OUTPUT_STYLE))
+                                      output_style=p.get("output_style", DEFAULT_OUTPUT_STYLE),
+                                      layout=p.get("layout", "run"), roots=p.get("roots", ()))
             elif self.operation == "replace":
                 result = replace_originals(p["batch"], p["directory"], self.isInterruptionRequested, progress,
                                            output_style=p.get("output_style", DEFAULT_OUTPUT_STYLE))
@@ -79,3 +80,17 @@ class PreviewWorker(QThread):
         except Exception as error:
             if not self.isInterruptionRequested():
                 self.failed.emit(self.request_id, str(error))
+
+
+class CacheCleanupWorker(QThread):
+    failed = Signal(str)
+
+    def __init__(self, cache, parent=None):
+        super().__init__(parent)
+        self.cache = cache
+
+    def run(self):
+        try:
+            self.cache.cleanup()
+        except OSError as error:
+            self.failed.emit(str(error))

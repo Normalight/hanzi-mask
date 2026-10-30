@@ -55,7 +55,7 @@ def review_hints(metrics: Mapping[str, object], *, can_undo: bool = False) -> li
 
     if (pixels is not None and width is not None and height is not None
             and width > 0 and height > 0 and pixels / (width * height) >= .6):
-        hints.append('字形区域占比偏高，可能与背景粘连；可用“画笔工具”的背景色画线分割后选块清理，无法确认时取消“采用”。')
+        hints.append('字形区域占比偏高，可能与背景粘连；可用“画笔工具”的背景色擦除粘连处后选块清理，无法确认时取消“采用”。')
 
     if isolated_removed is not None and isolated_removed > 0:
         hints.append('已筛除远离主体的小区域，独立点画可能受影响；可对照原图用“画笔工具”手动填补，'
@@ -74,8 +74,8 @@ def review_hints(metrics: Mapping[str, object], *, can_undo: bool = False) -> li
 
     if manual and not empty and not heavy_removal:
         if can_undo:
-            hints.append('已人工修改，请对照原图检查分割与填补处；需要恢复时可点“撤销修改”。')
+            hints.append('已人工修改，请对照原图检查擦除与填补处；需要恢复时可点“撤销修改”。')
         else:
-            hints.append('已人工修改，请对照原图检查分割与填补处；需要恢复时可点“处理当前图片”重新生成。')
+            hints.append('已人工修改，请对照原图检查擦除与填补处；需要恢复时可点“处理当前图片”重新生成。')
 
     return hints

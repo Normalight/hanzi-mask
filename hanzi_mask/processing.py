@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from .cancellation import check_cancelled
 from .edge_refinement import refine_edges
 from .stroke_recovery import recover_strokes
 from .tip_recovery import preserve_tips
@@ -107,7 +108,9 @@ def filter_components(mask: np.ndarray, min_area: int) -> tuple[np.ndarray, int]
 
 
 def process_image(path: Path, options: Options, manual_mask: Path | None = None) -> Result:
+    check_cancelled()
     original = load_image(path, options.foreground)
+    check_cancelled()
     raw_gray = np.asarray(original.convert("L"))
     gray = raw_gray
     color_signal, color_evidence = None, {}
@@ -205,7 +208,9 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
     else:
         mask = candidate.copy()
         if options.method == "texture" and not low_contrast:
+            check_cancelled()
             processed = smooth_texture(foreground_gray, strength, options.texture_scale)
+            check_cancelled()
             if options.threshold is None:
                 threshold, _ = cv2.threshold(
                     processed, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU
@@ -233,6 +238,7 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
         mask, components = filter_components(mask, min_area)
 
     if options.edge_refine and raw_foreground_signal is not None:
+        check_cancelled()
         mask, edge_metrics = refine_edges(mask, raw_foreground_signal)
         # Refinement verifies component/hole preservation. Do not repeat the
         # area filter or discard accepted tiny dots after an edge loses a pixel.
@@ -241,7 +247,9 @@ def process_image(path: Path, options: Options, manual_mask: Path | None = None)
             and options.threshold is None and not low_contrast):
         # Restore supported short tails only after all pruning. No subsequent
         # opening, area filter or edge refinement can clip these additions.
+        check_cancelled()
         mask, tip_metrics = preserve_tips(mask, raw_foreground_signal, stroke_radius=radius)
+    check_cancelled()
 
     if recovery_additions is not None:
         # This counts only this step's added pixels that actually survive the

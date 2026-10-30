@@ -11,6 +11,7 @@ from functools import lru_cache
 import cv2
 import numpy as np
 
+from .cancellation import check_cancelled
 
 BAND_RADIUS_PIXELS = 1.0
 MAX_REFINEMENT_PIXELS = 4_000_000
@@ -198,7 +199,9 @@ def refine_edges(mask: np.ndarray, raw_signal: np.ndarray) -> tuple[np.ndarray, 
     del raw_position, guide_position, band, supported, removals, proposals
     current = padded.copy()
     rejected = 0
-    for index in order:
+    for step, index in enumerate(order):
+        if step % 256 == 0:
+            check_cancelled()
         row, column = coordinates[index]
         y, x = int(row) + 1, int(column) + 1
         pattern = 0

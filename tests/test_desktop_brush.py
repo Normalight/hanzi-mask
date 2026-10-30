@@ -69,7 +69,7 @@ def test_default_brush_cut_select_fill_export_and_undo(window, qapp, tmp_path, s
     window.save_mode.setCurrentIndex(window.save_mode.findData('export'))
     window.save_results()
     wait_for(qapp, lambda: idle(window))
-    exported = next((window._last_output / 'images').rglob('*.png'))
+    exported = next(window._last_output.rglob('*.png'))
     with Image.open(exported) as image:
         expected = 255 - load_mask(filled) if style == 'black-on-white' else load_mask(filled)
         np.testing.assert_array_equal(np.asarray(image), expected)
