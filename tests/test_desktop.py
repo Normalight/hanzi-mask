@@ -400,6 +400,69 @@ def test_focused_mask_keyboard_cleanup_supports_both_polarities_multiselect_and_
     assert not window._test_messages
 
 
+def test_zoom_slider_and_fit_button(window, qapp, tmp_path):
+    path = write_two_components(tmp_path / 'input' / 'glyph.png')
+    import_and_process(window, qapp, path)
+    initial_scale = window.preview.scale
+    window.zoom_slider.setValue(250)
+    assert window.preview.scale == pytest.approx(initial_scale * 2.5)
+    assert window.zoom_label.text() == '250%'
+    window.zoom_fit_button.click()
+    assert window.zoom_slider.value() == 100
+    assert window.zoom_label.text() == '适配'
+    assert window.preview.scale == pytest.approx(initial_scale)
+
+
+def test_pan_tool_drags_without_editing(window, qapp, tmp_path):
+    path = write_two_components(tmp_path / 'input' / 'glyph.png')
+    import_and_process(window, qapp, path)
+    initial = batch_module.load_mask(window.records[path]).copy()
+    window.zoom_slider.setValue(300)
+    window.pan_tool_button.click()
+    for canvas in (window.preview.mask_canvas, window.preview.changes_canvas):
+        center = window.preview.image_center
+        point = canvas.rect().center()
+        QTest.mousePress(canvas, Qt.LeftButton, pos=point)
+        QTest.mouseMove(canvas, point + QPoint(20, 10))
+        QTest.mouseRelease(canvas, Qt.LeftButton, pos=point + QPoint(20, 10))
+        assert window.preview.image_center != center
+    assert window.worker is None
+    np.testing.assert_array_equal(batch_module.load_mask(window.records[path]), initial)
+    window.select_tool_button.click()
+    assert window.preview.mask_canvas.tool == 'select'
+
+
+def test_comparison_selection_corrects_changes_and_undoes(window, qapp, tmp_path):
+    path = write_two_components(tmp_path / 'input' / 'glyph.png')
+    import_and_process(window, qapp, path)
+    initial = batch_module.load_mask(window.records[path]).copy()
+    window.select_tool_button.click()
+    canvas = window.preview.changes_canvas
+    candidate = initial.copy()
+    candidate[4:7, 4:7] = 255
+    candidate[18, 70] = 0
+    canvas.set_changes(initial, candidate)
+    rect = canvas.image_rect()
+    red = QPoint(round(rect.left() + 5.5 * rect.width() / 96),
+                 round(rect.top() + 5.5 * rect.height() / 80))
+    point = QPoint(round(rect.left() + 70.5 * rect.width() / 96),
+                   round(rect.top() + 18.5 * rect.height() / 80))
+    QTest.mouseClick(canvas, Qt.LeftButton, pos=red)
+    QTest.mouseClick(canvas, Qt.LeftButton, Qt.ControlModifier, pos=point)
+    assert window.preview.selection_count == 10
+    assert not canvas.overlay.isNull()
+    assert QApplication.focusWidget() is canvas
+    QTest.keyClick(canvas, Qt.Key_Delete)
+    wait_for(qapp, lambda: idle(window))
+    expected = initial.copy()
+    expected[4:7, 4:7] = 255
+    expected[18, 70] = 0
+    np.testing.assert_array_equal(batch_module.load_mask(window.records[path]), expected)
+    window.undo_correction_button.click()
+    wait_for(qapp, lambda: idle(window))
+    np.testing.assert_array_equal(batch_module.load_mask(window.records[path]), initial)
+
+
 @pytest.mark.parametrize('key', [Qt.Key_Backspace, Qt.Key_Delete])
 @pytest.mark.parametrize('editor', ['output', 'search'])
 def test_text_editor_delete_keys_edit_text_without_removing_selected_component(

@@ -33,7 +33,7 @@ from .task_worker import CacheCleanupWorker, PreviewWorker, TaskWorker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = '字形换底'
-CORRECTION_NAMES = {'brush_cut': '画笔擦除', 'brush_fill': '画笔填补', 'select': '清理色块'}
+CORRECTION_NAMES = {'brush_cut': '画笔擦除', 'brush_fill': '画笔填补', 'select': '清理色块', 'changes': '纠正变化区域'}
 
 
 class MainWindow(QMainWindow):
@@ -242,6 +242,21 @@ class MainWindow(QMainWindow):
         preview_bar.addWidget(self.current_name, 1)
         preview_bar.addWidget(self.check_updates_button)
         self.preview = PreviewPanel()
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(25, 800)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedWidth(130)
+        self.zoom_slider.setToolTip('可用触控板捏合或鼠标滚轮缩放；拖动画面可移动')
+        self.zoom_slider.valueChanged.connect(self.preview.set_zoom_percent)
+        self.zoom_label = QLabel('适配')
+        self.zoom_label.setMinimumWidth(45)
+        self.zoom_fit_button = QPushButton('适配')
+        self.zoom_fit_button.clicked.connect(self.preview.fit)
+        self.preview.zoom_changed.connect(self._zoom_changed)
+        preview_bar.addWidget(QLabel('缩放'))
+        preview_bar.addWidget(self.zoom_slider)
+        preview_bar.addWidget(self.zoom_label)
+        preview_bar.addWidget(self.zoom_fit_button)
         self.preview.output_style_changed.connect(self._preview_style_changed)
         self.preview.selected_pixels.connect(self._selection_changed)
         self.preview.clear_requested.connect(self.clear_selected_component)
@@ -254,7 +269,9 @@ class MainWindow(QMainWindow):
         self.tool_group = QButtonGroup(self)
         self.select_tool_button = QPushButton('选中色块')
         self.brush_tool_button = QPushButton('画笔工具')
-        for button, tool in ((self.select_tool_button, 'select'), (self.brush_tool_button, 'brush')):
+        self.pan_tool_button = QPushButton('拖动画面')
+        for button, tool in ((self.select_tool_button, 'select'), (self.brush_tool_button, 'brush'),
+                             (self.pan_tool_button, 'pan')):
             button.setCheckable(True)
             self.tool_group.addButton(button)
             button.clicked.connect(lambda _=False, value=tool: self._set_correction_tool(value))
@@ -319,10 +336,6 @@ class MainWindow(QMainWindow):
         correction_bar.addWidget(self.clear_component_button)
         correction_bar.addStretch()
         work.addLayout(correction_bar)
-        self.correction_note = QLabel()
-        self.correction_note.setWordWrap(True)
-        self.correction_note.setStyleSheet('color: #6b7280; font-size: 11px;')
-        work.addWidget(self.correction_note)
         self.preview.setMinimumHeight(250)
         self.body_splitter = body = QSplitter(Qt.Vertical)
         body.setHandleWidth(6)
@@ -905,7 +918,8 @@ class MainWindow(QMainWindow):
             self._on_item(result, corrected_mask=self.worker.payload['mask'])
             notes = self.records[result.source.path].metrics['review_reasons']
             self._set_row(result.source.path, '已矫正', '；'.join(notes))
-            action = '已完成画笔精修' if self.worker.payload.get('tool') == 'brush' else '已清理选中色块'
+            action = ('已完成画笔精修' if self.worker.payload.get('tool') == 'brush' else
+                      '已纠正变化区域' if self.worker.payload.get('action') == 'changes' else '已清理选中色块')
             self.status.setText(action + '，保存时应用当前矫正结果')
         elif isinstance(result, SaveSummary):
             if self._platform_services is not None:
@@ -1085,10 +1099,16 @@ class MainWindow(QMainWindow):
         self.preview.mask_canvas.set_tool(tool)
         self.select_tool_button.setChecked(tool == 'select')
         self.brush_tool_button.setChecked(tool == 'brush')
+        self.pan_tool_button.setChecked(tool == 'pan')
         self.brush_options.setVisible(tool == 'brush')
         self.clear_component_button.setVisible(tool == 'select')
         self._sync_brush_controls()
         self._selection_changed(self.preview.selection_count)
+
+    def _zoom_changed(self, label):
+        self.zoom_label.setText(label)
+        with QSignalBlocker(self.zoom_slider):
+            self.zoom_slider.setValue(self.preview.zoom_percent)
 
     def _sync_brush_controls(self, *_):
         canvas = self.preview.mask_canvas
@@ -1111,12 +1131,8 @@ class MainWindow(QMainWindow):
             button.setToolTip(f'{color} · {action}：{help_text}')
 
     def _selection_changed(self, pixels):
-        if self.preview.mask_canvas.tool == 'brush':
-            self.correction_note.hide()
-        else:
-            self.correction_note.show()
-            self.correction_note.setText(f'已选中 {pixels} 个像素 · 退格或 Delete 清理' if pixels else
-                                         '点击选块 · Ctrl/Command 多选 · Delete 清理')
+        changes = bool(self.preview.changes_canvas.selected)
+        self.clear_component_button.setText('纠正选中变化' if changes else '清理选中色块')
         self._update_buttons()
 
     def clear_selected_component(self):
@@ -1135,7 +1151,9 @@ class MainWindow(QMainWindow):
                 or self._preview_loading or source is None or source.path not in self.records):
             self.preview.mask_canvas.discard_pending_mask()
             return
-        action = ('brush_fill' if self.preview.mask_canvas.brush_foreground else 'brush_cut') if tool == 'brush' else 'select'
+        action = (('brush_fill' if self.preview.mask_canvas.brush_foreground else 'brush_cut') if tool == 'brush'
+                  else 'changes' if self.preview.changes_canvas.selected else 'select')
+        self.preview.changes_canvas.clear_selection()
         self.preview.mask_canvas.show_pending_mask(mask)
         self._launch('correct', {'item': self.records[source.path], 'mask': mask,
                                 'tool': tool, 'action': action,

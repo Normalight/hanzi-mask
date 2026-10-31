@@ -10,7 +10,7 @@ from PIL import Image
 
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QContextMenuEvent, QWheelEvent
+from PySide6.QtGui import QContextMenuEvent, QNativeGestureEvent, QPointingDevice, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMenu
 
@@ -82,6 +82,27 @@ def test_same_pixels_and_colored_changes_are_independent_of_input(panel):
     assert panel.mask_canvas.image.pixelColor(2, 2).red() == 0
 
 
+def test_comparison_selects_only_changes_and_reverses_each_color(panel):
+    mask = np.zeros((20, 20), dtype=np.uint8)
+    candidate = mask.copy()
+    candidate[3, 3] = candidate[4, 4] = 255
+    mask[10:12, 10:12] = 255
+    mask[15, 15] = candidate[15, 15] = 255
+    panel.set_images(Image.new('RGB', (20, 20), 'gray'), mask, candidate)
+    panel.mask_canvas.set_tool('select')
+    canvas = panel.changes_canvas
+    QTest.mouseClick(canvas, Qt.LeftButton, pos=pixel_position(canvas, 3, 3))
+    QTest.mouseClick(canvas, Qt.LeftButton, Qt.ControlModifier, pos=pixel_position(canvas, 10, 10))
+    assert panel.selection_count == 6
+    corrected = panel.remove_selected()
+    assert corrected[3, 3] == corrected[4, 4] == 255
+    assert not corrected[10:12, 10:12].any()
+    assert corrected[15, 15] == 255
+    QTest.mouseClick(canvas, Qt.LeftButton, pos=pixel_position(canvas, 15, 15))
+    assert panel.selection_count == 0
+    assert panel.remove_selected() is None
+
+
 def test_always_fitted_previews_keep_original_pixels_and_fit_after_resize(panel):
     original = Image.new("RGB", (400, 300), "white")
     mask = np.zeros((300, 400), dtype=np.uint8)
@@ -115,7 +136,7 @@ def test_always_fitted_previews_keep_original_pixels_and_fit_after_resize(panel)
         assert view.image.height() == 300
 
 
-def test_wheel_and_drag_do_not_zoom_or_pan_any_preview(panel):
+def test_wheel_zoom_and_original_drag_keep_previews_synchronized(panel):
     panel.set_images(Image.new("RGB", (400, 300), "white"), None, None)
     scale, center = panel.scale, QPointF(panel.image_center)
     canvas = panel.original_canvas
@@ -124,12 +145,100 @@ def test_wheel_and_drag_do_not_zoom_or_pan_any_preview(panel):
                         QPoint(), QPoint(0, 120),
                         Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
     QApplication.sendEvent(canvas, wheel)
-    assert panel.scale == scale
+    assert panel.scale == pytest.approx(scale * 1.2)
     QTest.mousePress(canvas, Qt.LeftButton, pos=point)
+    QTest.mouseMove(canvas, point + QPoint(25, 10))
     QTest.mouseRelease(canvas, Qt.LeftButton, pos=point + QPoint(25, 10))
-    assert panel.image_center == center
+    assert panel.image_center != center
     assert all(view.image_center == panel.image_center for view in panel.canvases)
-    assert panel.fit_mode
+    assert not panel.fit_mode
+
+
+def test_native_pinch_and_trackpad_scroll(panel, monkeypatch):
+    panel.set_images(Image.new('RGB', (400, 300), 'white'), None, None)
+    canvas = panel.changes_canvas
+    point = QPointF(QPoint(round(canvas.width() * .6), round(canvas.height() * .5)))
+    initial = canvas.image_point(point)
+    device = QPointingDevice.primaryPointingDevice()
+    global_point = QPointF(canvas.mapToGlobal(point.toPoint()))
+    monkeypatch.setattr(canvas_module, 'cursor_global_position', lambda: global_point.toPoint())
+    for kind, value in ((Qt.BeginNativeGesture, 0.0), (Qt.ZoomNativeGesture, .25)):
+        event = QNativeGestureEvent(kind, device, 2, point, point, global_point, value, QPointF())
+        QApplication.sendEvent(canvas, event)
+    assert panel.zoom_percent == 125
+    anchored = canvas.image_point(point)
+    assert anchored.x() == pytest.approx(initial.x())
+    assert anchored.y() == pytest.approx(initial.y())
+    center = QPointF(panel.image_center)
+    wheel = QWheelEvent(point, global_point, QPoint(20, 10), QPoint(),
+                        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False)
+    QApplication.sendEvent(canvas, wheel)
+    assert panel.image_center != center
+
+
+def test_pinch_uses_actual_cursor_and_ignores_reported_position(panel, monkeypatch):
+    panel.set_images(Image.new('RGB', (40, 400), 'white'), None, None)
+    canvas = panel.changes_canvas
+    device = QPointingDevice.primaryPointingDevice()
+    start = QPointF(15, canvas.height() / 2)
+    pointer = QPointF(canvas.width() - 25, canvas.height() / 2)
+    monkeypatch.setattr(canvas_module, 'cursor_global_position',
+                        lambda: canvas.mapToGlobal(pointer.toPoint()))
+    pointer = QPointF(pointer.toPoint())
+    anchor = canvas.image_point(pointer)
+
+    def send(kind, point, value):
+        event = QNativeGestureEvent(kind, device, 2, point, point,
+                                    QPointF(canvas.mapToGlobal(point.toPoint())), value, QPointF())
+        QApplication.sendEvent(canvas, event)
+
+    send(Qt.BeginNativeGesture, start, 0)
+    send(Qt.ZoomNativeGesture, start, -.5)
+    assert canvas.image_point(pointer).x() == pytest.approx(anchor.x())
+    assert canvas.image_point(pointer).y() == pytest.approx(anchor.y())
+    moved = start + QPointF(12, 7)
+    send(Qt.ZoomNativeGesture, moved, .2)
+    assert canvas.image_point(pointer).x() == pytest.approx(anchor.x())
+    assert canvas.image_point(pointer).y() == pytest.approx(anchor.y())
+    send(Qt.EndNativeGesture, moved, 0)
+    before = QPointF(panel.image_center)
+    panel._pan(QPointF(3, 0))
+    assert panel.image_center.x() == pytest.approx(before.x() - 3 / panel.scale)
+
+
+def test_pinch_outside_previews_keeps_view_center(panel, monkeypatch):
+    panel.set_images(Image.new('RGB', (80, 80), 'white'), None, None)
+    monkeypatch.setattr(canvas_module, 'cursor_global_position', lambda: QPoint(-10000, -10000))
+    canvas = panel.changes_canvas
+    point = QPointF(10, 10)
+    event = QNativeGestureEvent(Qt.ZoomNativeGesture, QPointingDevice.primaryPointingDevice(),
+                                2, point, point, point, .5, QPointF())
+    before = QPointF(panel.image_center)
+    QApplication.sendEvent(canvas, event)
+    assert panel.image_center == before
+
+
+def test_zoom_pan_and_select_changes_share_image_coordinates(panel):
+    mask = np.zeros((80, 80), dtype=np.uint8)
+    candidate = mask.copy()
+    candidate[40:43, 40:43] = 255
+    panel.set_images(Image.new('RGB', (80, 80), 'gray'), mask, candidate)
+    fitted_scale = panel.scale
+    panel.set_zoom_percent(300)
+    assert panel.scale == pytest.approx(fitted_scale * 3)
+    canvas = panel.changes_canvas
+    start = canvas.rect().center()
+    QTest.mousePress(canvas, Qt.LeftButton, Qt.ShiftModifier, start)
+    QTest.mouseMove(canvas, start + QPoint(30, 10))
+    QTest.mouseRelease(canvas, Qt.LeftButton, Qt.ShiftModifier, start + QPoint(30, 10))
+    assert panel.image_center != QPointF(40, 40)
+    assert all(view.image_center == panel.image_center for view in panel.canvases)
+    panel.mask_canvas.set_tool('select')
+    QTest.mouseClick(canvas, Qt.LeftButton, pos=pixel_position(canvas, 41, 41))
+    assert panel.selection_count == 9
+    assert panel.remove_selected()[41, 41] == 255
+    panel.fit()
+    assert panel.zoom_percent == 100 and panel.image_center == QPointF(40, 40)
 
 
 def test_invalid_mask_preserves_previous_selection(panel):

@@ -7,11 +7,15 @@ return a new mask for the window to persist as an undoable correction.
 import cv2
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QSizePolicy, QVBoxLayout, QWidget
 
 from hanzi_mask.output_style import DEFAULT_OUTPUT_STYLE, OUTPUT_STYLES, render_mask, validate_output_style
+
+
+def cursor_global_position():
+    return QCursor.pos()
 
 
 def rgb_image(pixels: np.ndarray) -> QImage:
@@ -56,6 +60,8 @@ class ImageCanvas(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setCursor(Qt.ArrowCursor)
+        self._pan_position = None
+        self._pan_button = None
 
     def sizeHint(self):
         return QSize(300, 360)
@@ -100,14 +106,44 @@ class ImageCanvas(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.panel.fit()
+        self.panel._fit_scale()
 
     def wheelEvent(self, event):
-        # The client always shows the complete glyph. Accept the wheel event so
-        # it cannot zoom or unexpectedly scroll a surrounding input panel.
+        if self.panel.has_image:
+            pixels = event.pixelDelta()
+            if not pixels.isNull():
+                self.panel._pan(QPointF(pixels))
+            elif event.angleDelta().y():
+                self.panel._zoom(1.2 ** (event.angleDelta().y() / 120),
+                                 canvas=self, position=event.position())
         event.accept()
 
+    def event(self, event):
+        if event.type() == QEvent.NativeGesture and self.panel.has_image:
+            if event.gestureType() == Qt.BeginNativeGesture:
+                self.panel._gesture_zoom = float(self.panel.zoom_percent)
+            elif event.gestureType() == Qt.ZoomNativeGesture:
+                # Use the actual pointer rather than the event's reported
+                # location, which can differ between native gesture backends.
+                target, position = self.panel.pointer_anchor()
+                self.panel._zoom(max(0.01, 1.0 + event.value()), canvas=target,
+                                 position=position, gesture=True)
+            elif event.gestureType() == Qt.EndNativeGesture:
+                pass
+            else:
+                return super().event(event)
+            event.accept()
+            return True
+        return super().event(event)
+
     def mousePressEvent(self, event):
+        if (self.panel.has_image and (event.button() == Qt.MiddleButton or
+                (event.button() == Qt.LeftButton and (event.modifiers() & Qt.ShiftModifier or
+                 self is self.panel.original_canvas or self.panel.mask_canvas.tool == 'pan')))):
+            self._pan_position = event.position()
+            self._pan_button = event.button()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton:
             self.setFocus()
             event.accept()
@@ -115,9 +151,20 @@ class ImageCanvas(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._pan_position is not None:
+            delta = event.position() - self._pan_position
+            self._pan_position = event.position()
+            self.panel._pan(delta)
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == self._pan_button and self._pan_position is not None:
+            self._pan_position = None
+            self._pan_button = None
+            event.accept()
+            return
         if event.button() == Qt.LeftButton:
             event.accept()
             return
@@ -157,12 +204,13 @@ class MaskCanvas(ImageCanvas):
         self.setMouseTracking(True)
 
     def set_tool(self, tool):
-        if tool not in ("select", "brush"):
+        if tool not in ("select", "brush", "pan"):
             raise ValueError("未知精修工具")
         if tool != self.tool:
             self.cancel_stroke()
             self.tool = tool
             self.clear_selection()
+            self.panel.changes_canvas.clear_selection()
         self._update_cursor()
 
     def set_editable(self, editable):
@@ -187,6 +235,8 @@ class MaskCanvas(ImageCanvas):
             cursor = Qt.ArrowCursor
         elif self.tool == "brush":
             cursor = Qt.CrossCursor if self.editable else Qt.ArrowCursor
+        elif self.tool == "pan":
+            cursor = Qt.OpenHandCursor
         else:
             cursor = Qt.PointingHandCursor
         self.setCursor(cursor)
@@ -315,11 +365,13 @@ class MaskCanvas(ImageCanvas):
             self._selection_overlay = QImage()
         self.panel.selected_pixels.emit(self.selection_count)
         self.update()
+        self.panel.changes_canvas.update()
 
-    def _select_position(self, position, modifiers):
+    def _select_position(self, position, modifiers, canvas=None):
         if self._labels is None or self.image.isNull() or self._pending_mask is not None:
             return
-        point = self.image_point(position)
+        self.panel.changes_canvas.clear_selection()
+        point = (canvas or self).image_point(position)
         x, y = int(np.floor(point.x())), int(np.floor(point.y()))
         height, width = self._labels.shape
         label = int(self._labels[y, x]) if 0 <= x < width and 0 <= y < height else 0
@@ -335,6 +387,9 @@ class MaskCanvas(ImageCanvas):
         self._update_selection()
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ShiftModifier or self.tool == 'pan'):
+            super().mousePressEvent(event)
+            return
         if event.button() == Qt.LeftButton:
             self.setFocus(Qt.MouseFocusReason)
             if self.tool == "select":
@@ -351,6 +406,9 @@ class MaskCanvas(ImageCanvas):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._pan_position is not None:
+            super().mouseMoveEvent(event)
+            return
         self._hover_position = event.position()
         if self._stroke_mask is not None:
             self._draw_stroke(event.position())
@@ -358,6 +416,9 @@ class MaskCanvas(ImageCanvas):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        if self._pan_position is not None:
+            super().mouseReleaseEvent(event)
+            return
         if event.button() == Qt.LeftButton and self._stroke_mask is not None:
             self._draw_stroke(event.position())
             mask = self._stroke_mask
@@ -411,6 +472,100 @@ class MaskCanvas(ImageCanvas):
         return Qt.white if self.inverted else Qt.black
 
 
+class ChangesCanvas(ImageCanvas):
+    """Select connected red and cyan differences for correction."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.labels = {}
+        self.selected = set()
+        self.overlay = QImage()
+
+    def set_changes(self, mask, candidate):
+        self.labels = {}
+        self.clear_selection()
+        if mask is not None and candidate is not None:
+            for name, pixels in (("red", (candidate > 0) & (mask == 0)),
+                                 ("cyan", (candidate == 0) & (mask > 0))):
+                self.labels[name] = cv2.connectedComponents(pixels.astype(np.uint8), connectivity=8)[1]
+        self.panel.selected_pixels.emit(self.panel.selection_count)
+
+    @property
+    def selection_count(self):
+        return sum(int(np.count_nonzero(self.labels[name] == label)) for name, label in self.selected)
+
+    def clear_selection(self):
+        self.selected.clear()
+        self.overlay = QImage()
+        self.update()
+
+    def corrected_mask(self):
+        if not self.selected:
+            return None
+        result = self.panel.mask_canvas._mask.copy()
+        for name, label in self.selected:
+            result[self.labels[name] == label] = 255 if name == "red" else 0
+        return result
+
+    def _select(self, position, modifiers):
+        mask = self.panel.mask_canvas
+        if mask._pending_mask is not None or not self.labels:
+            return
+        mask.clear_selection()
+        point = self.image_point(position)
+        x, y = int(np.floor(point.x())), int(np.floor(point.y()))
+        selected = None
+        for name, labels in self.labels.items():
+            if 0 <= y < labels.shape[0] and 0 <= x < labels.shape[1] and labels[y, x]:
+                selected = (name, int(labels[y, x]))
+                break
+        if not selected:
+            self.selected.clear()
+        elif modifiers & (Qt.ControlModifier | Qt.MetaModifier):
+            self.selected.symmetric_difference_update({selected})
+        else:
+            self.selected = {selected}
+        if self.selected:
+            shape = next(iter(self.labels.values())).shape
+            rgba = np.zeros((*shape, 4), dtype=np.uint8)
+            for name, label in self.selected:
+                rgba[self.labels[name] == label] = (255, 145, 15, 175)
+            self.overlay = QImage(rgba.data, shape[1], shape[0], rgba.strides[0], QImage.Format_RGBA8888).copy()
+        else:
+            self.overlay = QImage()
+        self.panel.selected_pixels.emit(self.selection_count)
+        self.panel.mask_canvas.update()
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ShiftModifier or self.panel.mask_canvas.tool == 'pan'):
+            super().mousePressEvent(event)
+            return
+        if event.button() == Qt.LeftButton:
+            self.setFocus(Qt.MouseFocusReason)
+            mask = self.panel.mask_canvas
+            if mask.tool == "select":
+                self._select(event.position(), event.modifiers())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        mask = self.panel.mask_canvas
+        if (mask.tool == "select" and event.key() in (Qt.Key_Delete, Qt.Key_Backspace)
+                and self.panel.selection_count):
+            self.panel.clear_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _paint_overlay(self, painter):
+        overlay = self.overlay
+        if not overlay.isNull():
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, self.smooth)
+            painter.drawImage(self.image_rect(), overlay)
+
+
 class PreviewPanel(QWidget):
     zoom_changed = Signal(str)
     selected_pixels = Signal(int)
@@ -424,6 +579,8 @@ class PreviewPanel(QWidget):
         super().__init__(parent)
         self.scale = 1.0
         self.fit_mode = True
+        self.zoom_percent = 100
+        self._gesture_zoom = 100.0
         self.image_center = QPointF()
         self.image_size = QSize()
         self.canvases = ()
@@ -444,12 +601,14 @@ class PreviewPanel(QWidget):
             font.setBold(True)
             label.setFont(font)
             if index == 2:
-                label.setToolTip("红色：相对原始前景候选删除；青色：增加")
+                label.setToolTip("红色：已删除；青色：已增加。选中变化区域后按 Delete，红色恢复、青色移除")
             layout.addWidget(label)
             if index == 1:
                 self.mask_title = label
                 label.setToolTip("画笔：背景色擦除，字形色填补；选中色块：Ctrl/Command 多选，退格/Delete 清理；右键切换输出底色")
                 canvas = MaskCanvas(self, parent=column)
+            elif index == 2:
+                canvas = ChangesCanvas(self, parent=column)
             else:
                 canvas = ImageCanvas(self, placeholder="请选择图片" if index == 0 else "未处理",
                                      parent=column)
@@ -465,14 +624,16 @@ class PreviewPanel(QWidget):
 
     @property
     def selection_count(self):
-        return self.mask_canvas.selection_count
+        return self.mask_canvas.selection_count + self.changes_canvas.selection_count
 
     def clear_selection(self):
         self.mask_canvas.cancel_stroke()
         self.mask_canvas.clear_selection()
+        self.changes_canvas.clear_selection()
+        self.selected_pixels.emit(0)
 
     def remove_selected(self):
-        return self.mask_canvas.remove_selected()
+        return self.changes_canvas.corrected_mask() if self.changes_canvas.selected else self.mask_canvas.remove_selected()
 
     def set_mask_inverted(self, inverted):
         self.mask_canvas.set_inverted(inverted)
@@ -505,6 +666,7 @@ class PreviewPanel(QWidget):
         # Build every QImage before replacing the selection, so invalid data
         # cannot leave a mixture of the previous and current glyph.
         self.mask_canvas.set_mask(mask)
+        self.changes_canvas.set_changes(mask_pixels, candidate_pixels)
         for canvas, image in zip(self.canvases, (original_qimage, mask_qimage, changes_qimage)):
             canvas.image = image
         self._original_pixels, self._candidate_pixels = rgb, candidate_pixels
@@ -519,6 +681,7 @@ class PreviewPanel(QWidget):
         rendered = gray_image(render_mask(pixels, self.output_style))
         changes = changes_image(self._original_pixels, pixels, self._candidate_pixels)
         self.mask_canvas.set_mask(pixels)
+        self.changes_canvas.set_changes(pixels, self._candidate_pixels)
         self.mask_canvas.image = rendered
         self.changes_canvas.image = changes
         self.mask_canvas.update()
@@ -527,6 +690,7 @@ class PreviewPanel(QWidget):
     def clear(self):
         self._original_pixels = self._candidate_pixels = None
         self.mask_canvas.set_mask(None)
+        self.changes_canvas.set_changes(None, None)
         for canvas in self.canvases:
             canvas.image = QImage()
             canvas.update()
@@ -534,20 +698,39 @@ class PreviewPanel(QWidget):
         self.image_center = QPointF()
         self.scale = 1.0
         self.fit_mode = True
+        self.zoom_percent = 100
+        self._gesture_zoom = 100.0
         self.zoom_changed.emit("适配")
 
     def fit(self):
         self.fit_mode = True
+        self.zoom_percent = 100
+        self._gesture_zoom = 100.0
         if self.has_image:
             self.image_center = QPointF(self.image_size.width() / 2, self.image_size.height() / 2)
         self._fit_scale()
 
-    def _fit_scale(self):
+    def _fit_scale(self, *, refresh=True):
         if self.has_image:
-            self.scale = min(min(max(1, canvas.width() - 24) / self.image_size.width(),
+            self.scale = self.zoom_percent / 100 * min(min(max(1, canvas.width() - 24) / self.image_size.width(),
                                  max(1, canvas.height() - 24) / self.image_size.height())
                              for canvas in self.canvases)
-        self._refresh()
+        if refresh:
+            self._refresh()
+
+    def set_zoom_percent(self, percent):
+        self.zoom_percent = max(25, min(800, int(percent)))
+        self._gesture_zoom = float(self.zoom_percent)
+        self.fit_mode = self.zoom_percent == 100
+        self._fit_scale()
+
+    def pointer_anchor(self):
+        global_position = cursor_global_position()
+        for canvas in self.canvases:
+            position = canvas.mapFromGlobal(global_position)
+            if canvas.rect().contains(position):
+                return canvas, QPointF(position)
+        return None, None
 
     def actual_size(self):
         self.fit()
@@ -558,13 +741,26 @@ class PreviewPanel(QWidget):
     def zoom_out(self):
         self.fit()
 
-    def _zoom(self, factor, *, canvas=None, position=None):
-        self.fit()
+    def _zoom(self, factor, *, canvas=None, position=None, gesture=False):
+        if not self.has_image:
+            return
+        anchor = canvas.image_point(position) if canvas is not None and position is not None else None
+        value = (self._gesture_zoom if gesture else self.zoom_percent) * factor
+        self._gesture_zoom = max(25.0, min(800.0, value))
+        self.zoom_percent = round(self._gesture_zoom)
+        self.fit_mode = self.zoom_percent == 100
+        self._fit_scale(refresh=False)
+        if anchor is not None:
+            self.image_center = anchor - (QPointF(position) - canvas.viewport_center()) / self.scale
+        self._refresh()
 
     def _pan(self, delta):
-        self.fit()
+        if not self.has_image:
+            return
+        self.image_center = self.image_center - QPointF(delta) / self.scale
+        self._refresh()
 
     def _refresh(self):
         for canvas in self.canvases:
             canvas.update()
-        self.zoom_changed.emit("适配" if self.fit_mode else f"{self.scale * 100:.0f}%")
+        self.zoom_changed.emit("适配" if self.fit_mode else f"{self.zoom_percent}%")
