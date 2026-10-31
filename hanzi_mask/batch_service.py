@@ -647,6 +647,23 @@ def _check_source(item: ProcessedImage) -> None:
         raise ValueError(f"原图已变化，请重新处理后再保存：{item.source.path}")
 
 
+def _require_png_source(item: ProcessedImage) -> None:
+    with Image.open(item.source.path) as image:
+        if item.source.path.suffix.lower() != ".png" or image.format != "PNG":
+            raise ValueError(f"原位替换仅支持 PNG；其他格式请导出到新目录：{item.source.path.name}")
+
+
+def _mask_digest(mask: np.ndarray) -> str:
+    """Identify the accepted mask without paying for a PNG encode."""
+    return sha256(np.ascontiguousarray(mask).tobytes()).hexdigest()
+
+
+def _rendered_png(item: ProcessedImage, output_style: str) -> tuple[np.ndarray, bytes]:
+    """Load and validate the mask once, returning it with its encoded PNG."""
+    mask = load_mask(item)
+    return mask, _png_bytes(render_mask(mask, output_style))
+
+
 def _rollback(entries: list[dict], directory: Path) -> list[str]:
     errors = []
     for entry in reversed(entries):
@@ -684,36 +701,42 @@ def replace_originals(batch: BatchResult, backup_dir: Path | str,
     if any(item.source.path.is_relative_to(requested) for item in batch.items):
         raise ValueError("备份目录不能是原图所在目录或其上级目录")
     preflight_cancelled = False
+    # Validate every source and result before anything is written. The mask
+    # digest then guards both later passes, so the accepted result is encoded
+    # once instead of once per pass.
+    mask_digests: dict[Path, str] = {}
     for item in batch.items:
         if cancel is not None and cancel():
             preflight_cancelled = True
             break
         _check_source(item)
-        with Image.open(item.source.path) as image:
-            if item.source.path.suffix.lower() != ".png" or image.format != "PNG":
-                raise ValueError(f"原位替换仅支持 PNG；其他格式请导出到新目录：{item.source.path.name}")
-        _mask_bytes(item, output_style)
+        _require_png_source(item)
+        mask_digests[item.source.path] = _mask_digest(load_mask(item))
     directory = _new_directory(requested)
     summary = SaveSummary(directory, directory / "replacement.json")
     report = _base_report(batch, "replace", output_style)
     report["status"] = "backing_up"
     _report(summary.report_path, report)
+    rendered: dict[Path, bytes] = {}
     try:
         if preflight_cancelled:
             raise _Cancelled()
         # All backups must be durable before the first original is changed.
         for index, item in enumerate(batch.items, 1):
             _cancel(cancel)
-            _check_source(item)
             data = item.source.path.read_bytes()
             if sha256(data).hexdigest() != item.source_sha256:
                 raise ValueError(f"备份过程中原图发生变化：{item.source.path}")
+            mask, output = _rendered_png(item, output_style)
+            if _mask_digest(mask) != mask_digests[item.source.path]:
+                raise ValueError("处理结果在保存过程中发生变化")
+            rendered[item.source.path] = output
             relative = Path("originals") / f"{index:06d}.png"
             _atomic_write(directory / relative, data, exclusive=True)
-            output = _mask_bytes(item, output_style)
             report["images"].append({"source": str(item.source.path), "backup": relative.as_posix(),
                                       "source_sha256": item.source_sha256,
                                       "output_sha256": sha256(output).hexdigest(),
+                                      "mask_sha256": mask_digests[item.source.path],
                                       "status": "backed_up", "parameters": _item_parameters(item),
                                       "metrics": item.metrics})
         report["status"] = "replacing"
@@ -721,11 +744,10 @@ def replace_originals(batch: BatchResult, backup_dir: Path | str,
         for index, (item, entry) in enumerate(zip(batch.items, report["images"]), 1):
             _cancel(cancel)
             _check_source(item)
-            data = _mask_bytes(item, output_style)
-            if sha256(data).hexdigest() != entry["output_sha256"]:
+            if _mask_digest(load_mask(item)) != entry["mask_sha256"]:
                 raise ValueError("处理结果在保存过程中发生变化")
             _cancel(cancel)
-            _atomic_write(item.source.path, data)
+            _atomic_write(item.source.path, rendered[item.source.path])
             entry["status"] = "replaced"
             summary.outputs.append(item.source.path)
             if progress is not None:

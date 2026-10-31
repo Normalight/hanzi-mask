@@ -90,6 +90,10 @@ def load_image(path: Path, foreground: str) -> Image.Image:
     """Respect EXIF rotation and composite alpha onto the background color."""
     with Image.open(path) as source:
         oriented = ImageOps.exif_transpose(source)
+        if oriented.mode in {"RGB", "L"} and "transparency" not in oriented.info:
+            # Opaque inputs need no compositing; RGBA conversion here would add
+            # two full-size copies per decode on the preview path.
+            return oriented.convert("RGB")
         rgba = oriented.convert("RGBA")
         background = "black" if foreground == "light" else "white"
         canvas = Image.new("RGBA", rgba.size, background)
