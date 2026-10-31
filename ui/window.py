@@ -10,7 +10,9 @@ import tempfile
 
 import cv2
 from PySide6.QtCore import QEvent, QRectF, QSignalBlocker, QSize, Qt, QTimer, QUrl, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import (
+    QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
@@ -34,6 +36,7 @@ from .task_worker import CacheCleanupWorker, PreviewWorker, TaskWorker
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = '字形换底'
 CORRECTION_NAMES = {'brush_cut': '画笔擦除', 'brush_fill': '画笔填补', 'select': '清理色块', 'changes': '纠正变化区域'}
+_HISTORY_FAINT_ROLE = int(Qt.UserRole) + 1
 
 
 class MainWindow(QMainWindow):
@@ -49,11 +52,13 @@ class MainWindow(QMainWindow):
         self.roots = []
         self.inputs = []
         self._row_by_path = {}
+        self._table_paths = []
         self.records = {}
         self.errors = {}
         self._correction_history = {}
         self._correction_redo = {}
         self._history_view_key = None
+        self._history_source = None
         self._tuning_paused = 0
         self._tuning_generation = 0
         self._pending_preview = None
@@ -604,6 +609,7 @@ class MainWindow(QMainWindow):
         self.root_list.clear()
         self.inputs.clear()
         self._row_by_path.clear()
+        self._table_paths = []
         self.records.clear()
         self.errors.clear()
         self._correction_history.clear()
@@ -638,24 +644,26 @@ class MainWindow(QMainWindow):
         previous = previous or {}
         self.table.blockSignals(True)
         self._row_by_path = {source.path: row for row, source in enumerate(self.inputs)}
-        self.table.setRowCount(len(self.inputs))
-        for row, source in enumerate(self.inputs):
-            check = QTableWidgetItem()
-            check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
-            old = previous.get(source.path)
-            check.setCheckState(old['checked'] if old else Qt.Unchecked)
-            self.table.setItem(row, 0, check)
-            name = QTableWidgetItem(source.relative_path.as_posix())
-            name.setToolTip(str(source.path))
-            self.table.setItem(row, 1, name)
-            for column, value in ((2, '—'), (3, '未处理'), (4, '')):
-                self.table.setItem(row, column, QTableWidgetItem(value))
-            if old:
-                self.table.item(row, 2).setText(old['size'])
-                self.table.item(row, 3).setText(old['state'])
-                self.table.item(row, 4).setText(old['note'])
-                self.table.item(row, 4).setToolTip(old['note'])
-            self._update_adoption_cell(row)
+        paths = [source.path for source in self.inputs]
+        kept = len(self._table_paths)
+        if not (kept and paths[:kept] == self._table_paths):
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(paths))
+            kept = 0
+        else:
+            self.table.setRowCount(len(paths))
+        for row in range(kept):
+            # A rescan can rebind the export path of an already listed image.
+            source = self.inputs[row]
+            name = self.table.item(row, 1)
+            text = source.relative_path.as_posix()
+            if name.text() != text:
+                name.setText(text)
+            if name.toolTip() != str(source.path):
+                name.setToolTip(str(source.path))
+        for row in range(kept, len(paths)):
+            self._insert_row(row, self.inputs[row], previous.get(paths[row]))
+        self._table_paths = paths
         self.table.blockSignals(False)
         self.filter_rows()
         if self.inputs:
@@ -672,6 +680,23 @@ class MainWindow(QMainWindow):
         self.preview_selection()
         if self._pending_preview is None:
             self._schedule_tuned_preview()
+
+    def _insert_row(self, row, source, old):
+        check = QTableWidgetItem()
+        check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+        check.setCheckState(old['checked'] if old else Qt.Unchecked)
+        self.table.setItem(row, 0, check)
+        name = QTableWidgetItem(source.relative_path.as_posix())
+        name.setToolTip(str(source.path))
+        self.table.setItem(row, 1, name)
+        for column, value in ((2, '—'), (3, '未处理'), (4, '')):
+            self.table.setItem(row, column, QTableWidgetItem(value))
+        if old:
+            self.table.item(row, 2).setText(old['size'])
+            self.table.item(row, 3).setText(old['state'])
+            self.table.item(row, 4).setText(old['note'])
+            self.table.item(row, 4).setToolTip(old['note'])
+        self._update_adoption_cell(row)
 
     def _invalidate_results(self, note):
         self.records.clear()
@@ -786,9 +811,11 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._task_finished, Qt.QueuedConnection)
         if operation != 'correct':
             self.progress.setRange(0, 0)
-        self.status.setText({'scan': '正在扫描图片…', 'process': '正在处理图片…',
-                             'export': '正在导出结果…', 'copy': '正在保存原位置副本…', 'replace': '正在备份并替换…',
-                             'restore': '正在恢复原始图片…', 'correct': '正在保存人工矫正…'}[operation])
+            # A correction finishes in milliseconds; announcing it would replace
+            # the message twice and flash the status line. Only report it when done.
+            self.status.setText({'scan': '正在扫描图片…', 'process': '正在处理图片…',
+                                 'export': '正在导出结果…', 'copy': '正在保存原位置副本…', 'replace': '正在备份并替换…',
+                                 'restore': '正在恢复原始图片…'}[operation])
         self._update_buttons()
         worker.start()
 
@@ -1209,6 +1236,55 @@ class MainWindow(QMainWindow):
         action = CORRECTION_NAMES.get(item.metrics.get('correction_operation'), '人工修改')
         return f'{step} · {action}'
 
+    def _update_history_rows(self, source, states, current):
+        """Keep existing rows and only touch what changed.
+
+        Rebuilding the list makes every row repaint, which reads as a flash after
+        each brush stroke. History is capped at twenty revisions, so comparing
+        row identity and text is cheaper than repainting them.
+        """
+        path = source.path if source is not None else None
+        if not states:
+            if self._history_source != path or self.history_list.count() != 1:
+                self.history_list.clear()
+                self.history_list.addItem('处理图片后在这里查看修改记录')
+            self._history_source = path
+            return
+        ids = [id(record) for record, _ in states]
+        rows = [self.history_list.item(row).data(Qt.UserRole)
+                for row in range(self.history_list.count())]
+        if self._history_source != path or rows != ids[:len(rows)]:
+            self.history_list.clear()
+        self._history_source = path
+        while self.history_list.count() > len(ids):
+            self.history_list.takeItem(self.history_list.count() - 1)
+        appended = False
+        for index, (record, _) in enumerate(states):
+            item = self.history_list.item(index)
+            if item is None:
+                item = QListWidgetItem()
+                item.setData(Qt.UserRole, id(record))
+                if record.metrics.get('manual_correction'):
+                    item.setToolTip(f'删除 {record.metrics.get("correction_removed_pixels", 0)} 个像素，'
+                                    f'填补 {record.metrics.get("correction_added_pixels", 0)} 个像素；点击恢复此状态')
+                self.history_list.addItem(item)
+                appended = True
+            elif item.data(Qt.UserRole) != id(record):
+                item.setData(Qt.UserRole, id(record))
+            text = self._history_label(record)
+            if index == current:
+                text += '  ← 当前'
+            if item.text() != text:
+                item.setText(text)
+            fainter = index > current
+            if bool(item.data(_HISTORY_FAINT_ROLE)) != fainter:
+                item.setData(_HISTORY_FAINT_ROLE, fainter)
+                item.setForeground(QBrush(QColor('#808080')) if fainter else QBrush())
+        if self.history_list.currentRow() != current:
+            self.history_list.setCurrentRow(current)
+        if appended:
+            self.history_list.scrollToItem(self.history_list.item(current))
+
     def _sync_history_panel(self, editable):
         source = self.current_source()
         states, current = self._history_states(source)
@@ -1216,23 +1292,7 @@ class MainWindow(QMainWindow):
         if key != self._history_view_key:
             self._history_view_key = key
             with QSignalBlocker(self.history_list):
-                self.history_list.clear()
-                for index, (record, _) in enumerate(states):
-                    text = self._history_label(record)
-                    if index == current:
-                        text += '  ← 当前'
-                    item = QListWidgetItem(text)
-                    if index > current:
-                        item.setForeground(QColor('#808080'))
-                    if record.metrics.get('manual_correction'):
-                        item.setToolTip(f'删除 {record.metrics.get("correction_removed_pixels", 0)} 个像素，'
-                                        f'填补 {record.metrics.get("correction_added_pixels", 0)} 个像素；点击恢复此状态')
-                    self.history_list.addItem(item)
-                if states:
-                    self.history_list.setCurrentRow(current)
-                    self.history_list.scrollToItem(self.history_list.item(current))
-                else:
-                    self.history_list.addItem('处理图片后在这里查看修改记录')
+                self._update_history_rows(source, states, current)
         self.history_list.setEnabled(editable and bool(states))
         undo = editable and current > 0
         redo = editable and current + 1 < len(states)
@@ -1253,7 +1313,9 @@ class MainWindow(QMainWindow):
             matches = (not search or search in str(source.path).casefold())
             if selected_state != '全部图片':
                 matches = matches and state == selected_state
-            self.table.setRowHidden(row, not (matches or source.path == held_path))
+            hidden = not (matches or source.path == held_path)
+            if self.table.isRowHidden(row) != hidden:
+                self.table.setRowHidden(row, hidden)
         if self.current_source() is None:
             visible = next((row for row in range(len(self.inputs)) if not self.table.isRowHidden(row)), None)
             if visible is None:
@@ -1410,8 +1472,12 @@ class MainWindow(QMainWindow):
     def _update_buttons(self, *_):
         if not hasattr(self, 'save_button'):
             return
-        busy = self.worker is not None or self._closing
         correcting = self.worker is not None and self._task_operation == 'correct' and not self._closing
+        # A correction only writes one image's cache revision and finishes in
+        # milliseconds. Greying out the window for that window of time is a
+        # visible flash, so transient work keeps the surrounding controls live;
+        # every command that would conflict re-checks self.worker itself.
+        busy = (self.worker is not None or self._closing) and not correcting
         editing_task = self.worker is not None and self._task_operation in ('process', 'correct')
         editable_settings = not self._closing and (self.worker is None or editing_task)
         for button in self.file_buttons:
@@ -1419,10 +1485,13 @@ class MainWindow(QMainWindow):
         for widget in (self.root_list, self.scan_button):
             widget.setEnabled(not busy)
         self.output_group.setEnabled(editable_settings)
-        self.parameters.setEnabled(not self._closing and (self.worker is None or
+        self.parameters.setEnabled(not self._closing and (self.worker is None or correcting or
                                    (self._task_operation == 'process' and self.worker.payload.get('automatic'))))
         self.process_all_button.setEnabled(not busy and bool(self.inputs))
         self.process_current_button.setEnabled(not busy and self.current_source() is not None)
+        # Keep the save action in whatever state it already had while a
+        # correction is in flight: recounting to zero would disable and re-enable
+        # it within milliseconds, which reads as the button blinking.
         count = 0 if busy else len(self.adopted_items())
         self.save_button.setEnabled(not busy and count > 0)
         self.open_output_button.setEnabled(not self._closing and self._last_output is not None)
@@ -1443,7 +1512,7 @@ class MainWindow(QMainWindow):
         can_cancel_pending = self.worker is None and self._pending_preview_valid()
         self.cancel_button.setEnabled(not self._closing and (can_cancel_worker or can_cancel_pending))
         source = self.current_source()
-        editable = (not busy and source is not None and source.path in self.records
+        editable = (not busy and not correcting and source is not None and source.path in self.records
                     and self._platform_allows('correct'))
         canvas_editable = editable and not self._preview_loading
         self.preview.mask_canvas.set_editable(canvas_editable)
